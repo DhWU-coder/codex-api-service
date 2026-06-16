@@ -15,7 +15,11 @@ describe("console visual theme", () => {
     expect(styles).toContain("--token-output: #7aa7ff");
     expect(styles).toContain("--token-reasoning: #b26cff");
 
-    // 侧栏背景切换为深空黑，而不是墨绿色。
+    // 亮色模式侧栏也应跟随浅色主题，避免左右两栏主题割裂。
+    expect(styles).toContain("--sidebar-bg: #f8fbff");
+
+    // 深色模式仍保留深空黑，而不是墨绿色。
+    expect(styles).toContain(':root[data-theme="dark"]');
     expect(styles).toContain("--sidebar-bg: #080d16");
   });
 });
