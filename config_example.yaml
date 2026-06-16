@@ -1,0 +1,46 @@
+# 本地 OpenAI-compatible API 服务配置示例。
+# 复制本文件为 config.yaml 后再按需修改；config.yaml 默认不会提交到 Git。
+server:
+  # 默认只监听本机，避免把 OAuth 代理服务暴露到局域网。
+  host: 127.0.0.1
+  # 默认 API 服务端口。
+  port: 1219
+
+api:
+  # 留空表示不校验本地 Bearer token；也可用 CODEX_API_SERVICE_KEY 环境变量覆盖。
+  local_api_key:
+
+codex:
+  # 默认 Codex 模型名，客户端不传 model 时使用它。
+  default_model: gpt-5.5
+  # /v1/models 暴露的模型列表；默认至少包含 default_model。
+  available_models:
+    - gpt-5.5
+  # Codex OAuth 后端地址；通常不需要修改。
+  responses_url: https://chatgpt.com/backend-api/codex/responses
+  # 非流式聚合和上游请求的超时秒数。
+  timeout_seconds: 120
+  # Codex reasoning effort 默认值。
+  reasoning_effort: medium
+  # 是否默认启用 Codex Fast service tier；请求体可用 fast_mode 覆盖。
+  fast_mode: true
+  # 传给 Codex backend 的默认指令；留空时使用服务内置 Codex 指令。
+  instructions:
+  # 是否请求 reasoning.encrypted_content，和参考实现保持一致。
+  include_reasoning: true
+
+auth:
+  # 留空时默认使用 ~/.codex-api-service/auth.json 保存本服务 token。
+  auth_path:
+  # 留空时默认从 ~/.codex/auth.json 导入已有 Codex OAuth 登录结果。
+  import_auth_path:
+
+usage:
+  # 开启后，请求成功且上游返回真实 usage 时写入 codex-usage JSONL。
+  enabled: true
+  # 相对路径会解析到项目根目录下，供 codex-usage 导入整个项目目录。
+  path: .codex-usage/usage.jsonl
+  # codex-usage 识别用来源字段。
+  source: codex-oauth
+  # codex-usage 前端展示名称。
+  channel: Codex OAuth

@@ -1,0 +1,63 @@
+# Python 缓存和构建产物。
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# 本地虚拟环境。
+.venv/
+venv/
+env/
+
+# 前端依赖、缓存和构建产物。
+frontend/node_modules/
+frontend/.vite/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# React 控制台构建产物，公开仓库只保留 frontend 源码。
+codex_api_service/static/ui/
+
+# 本地配置、密钥和环境变量文件。
+config.yaml
+.env
+.env.*
+!.env.example
+auth.json
+*.pem
+*.key
+
+# 本服务本地 OAuth 缓存如果改到项目目录，也默认不提交。
+.codex-auth/
+
+# codex-usage 本地用量日志和运行日志，默认不提交。
+.codex-usage/
+logs/
+*.log
+*.jsonl
+
+# 个人本机路径或误复制进项目的用户目录，不进入公开仓库。
+wudonghao/
+wudonghao/**
+**/wudonghao/**
+Users/
+Users/**
+
+# IDE 和系统本地文件。
+.idea/
+.vscode/
+.DS_Store
+
+# Codex 本地开发过程中的内部计划文档。
+docs/superpowers/

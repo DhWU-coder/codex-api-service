@@ -1,0 +1,31 @@
+[project]
+# 包名用于本地安装和脚本入口。
+name = "codex-api-service"
+# 初始版本号，后续可以按兼容性变化递增。
+version = "0.1.0"
+# Python 版本和当前 .venv 保持一致。
+requires-python = ">=3.12"
+# 运行本地 API 服务所需的最小依赖。
+dependencies = [
+  "fastapi>=0.137.1",
+  "uvicorn>=0.49.0",
+  "httpx>=0.28.1",
+  "pyyaml>=6.0.3",
+]
+
+[project.optional-dependencies]
+# 测试依赖单独放在 dev extra，避免运行环境额外安装 pytest。
+dev = [
+  "pytest>=9.1.0",
+  "pytest-asyncio>=1.4.0",
+]
+
+[project.scripts]
+# 安装后可以直接执行 codex-api-service 启动本地服务。
+codex-api-service = "codex_api_service.app:main"
+
+[tool.pytest.ini_options]
+# pytest 默认只收集 tests 目录，避免扫描 .venv 或 IDE 文件。
+testpaths = ["tests"]
+# asyncio 测试使用严格模式，减少隐藏的事件循环问题。
+asyncio_mode = "strict"

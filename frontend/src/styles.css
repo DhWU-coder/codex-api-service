@@ -1,0 +1,886 @@
+/* 全局变量定义控制台的中性色、强调色和尺寸。 */
+:root {
+  --page-text: #182033;
+  --page-muted: #687489;
+  --page-title: #0a1020;
+  --page-bg: #eef3fb;
+  --page-gradient-start: rgba(248, 251, 255, 0.94);
+  --page-gradient-end: rgba(226, 233, 244, 0.96);
+  --grid-line: rgba(79, 140, 255, 0.14);
+  --sidebar-bg: #080d16;
+  --sidebar-text: #eef5ff;
+  --sidebar-muted: #8c9bb2;
+  --brand-bg: #4f8cff;
+  --brand-text: #f8fbff;
+  --nav-text: #a8b5cb;
+  --nav-active-bg: rgba(79, 140, 255, 0.16);
+  --nav-active-text: #e8f1ff;
+  --input-bg: #f8fbff;
+  --input-text: #182033;
+  --input-border: #cbd6e8;
+  --sidebar-input-bg: #0d1422;
+  --sidebar-input-border: #223149;
+  --panel-bg: rgba(248, 251, 255, 0.92);
+  --panel-border: #cbd8ec;
+  --panel-divider: #d9e2f0;
+  --chat-bg: #f3f7fc;
+  --message-bg: #ffffff;
+  --message-border: #d7e1f1;
+  --message-role: #63718a;
+  --user-message-bg: #eef5ff;
+  --user-message-border: #9dbfff;
+  --icon-bg: #edf3fb;
+  --pill-bg: #e9f0fa;
+  --pill-text: #526176;
+  --primary-bg: #4f8cff;
+  --primary-text: #ffffff;
+  --secondary-bg: #f3f7fd;
+  --secondary-text: #243149;
+  --secondary-border: #ccd8eb;
+  --danger-bg: #fff0ed;
+  --danger-text: #9a2f25;
+  --table-border: #dce5f1;
+  --table-head: #647087;
+  --status-ok-bg: #e9f5ff;
+  --status-ok-text: #245fcb;
+  --status-fail-bg: #fff0ed;
+  --status-fail-text: #a93a2f;
+  --error-bg: #fff0ed;
+  --error-text: #8b2b24;
+  --token-input: #24c6dc;
+  --token-output: #7aa7ff;
+  --token-reasoning: #b26cff;
+  --token-cached: #e9b85d;
+  color: var(--page-text);
+  background: var(--page-bg);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+/* 深色主题只覆盖变量，布局和组件结构保持同一套。 */
+:root[data-theme="dark"] {
+  --page-text: #e8eefc;
+  --page-muted: #94a3bd;
+  --page-title: #f7faff;
+  --page-bg: #050912;
+  --page-gradient-start: rgba(9, 15, 28, 0.98);
+  --page-gradient-end: rgba(4, 7, 13, 0.99);
+  --grid-line: rgba(79, 140, 255, 0.13);
+  --sidebar-bg: #080d16;
+  --sidebar-text: #eef5ff;
+  --sidebar-muted: #7d8aa2;
+  --brand-bg: #4f8cff;
+  --brand-text: #f8fbff;
+  --nav-text: #94a3bd;
+  --nav-active-bg: rgba(79, 140, 255, 0.18);
+  --nav-active-text: #f1f6ff;
+  --input-bg: #0a111f;
+  --input-text: #e8eefc;
+  --input-border: #223149;
+  --sidebar-input-bg: #070c15;
+  --sidebar-input-border: #1e2a3f;
+  --panel-bg: rgba(11, 18, 32, 0.9);
+  --panel-border: #24334d;
+  --panel-divider: #1f2c43;
+  --chat-bg: rgba(8, 14, 25, 0.88);
+  --message-bg: #0f1829;
+  --message-border: #253652;
+  --message-role: #92a3bd;
+  --user-message-bg: #101f3a;
+  --user-message-border: #3d73d8;
+  --icon-bg: #121c30;
+  --pill-bg: #121c30;
+  --pill-text: #bac7dc;
+  --primary-bg: #4f8cff;
+  --primary-text: #f8fbff;
+  --secondary-bg: #111b2e;
+  --secondary-text: #d9e5f8;
+  --secondary-border: #2a3b59;
+  --danger-bg: #331920;
+  --danger-text: #ffb4aa;
+  --table-border: #1f2c43;
+  --table-head: #95a6c0;
+  --status-ok-bg: #122542;
+  --status-ok-text: #8ab6ff;
+  --status-fail-bg: #391a23;
+  --status-fail-text: #ffaca2;
+  --error-bg: #361a22;
+  --error-text: #ffc6bd;
+  --token-input: #22d3ee;
+  --token-output: #7aa7ff;
+  --token-reasoning: #b26cff;
+  --token-cached: #f2c66d;
+}
+
+/* 所有元素使用 border-box，避免控件宽度因为 padding 产生横向溢出。 */
+* {
+  box-sizing: border-box;
+}
+
+/* 页面主体占满视口，给应用提供稳定高度。 */
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(180deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(180deg, var(--page-gradient-start), var(--page-gradient-end)),
+    var(--page-bg);
+  background-size: 40px 40px, 40px 40px, auto, auto;
+}
+
+/* 主布局使用左侧导航加右侧工作区，适合本地工具反复操作。 */
+.app-shell {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+/* 侧边栏承载导航和访问密钥，背景使用深色提高工作区对比。 */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding: 24px 18px;
+  border-right: 1px solid var(--panel-border);
+  color: var(--sidebar-text);
+  background: var(--sidebar-bg);
+}
+
+/* 品牌区只展示工具身份和监听地址。 */
+.brand-block {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+/* 字母标识提供一个轻量视觉锚点。 */
+.brand-mark {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  color: var(--brand-text);
+  background: var(--brand-bg);
+  border-radius: 8px;
+  box-shadow: 0 0 22px color-mix(in srgb, var(--brand-bg) 38%, transparent);
+  font-weight: 800;
+}
+
+/* 标题保持紧凑，避免工具界面像营销页。 */
+.brand-block h1 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+/* 副标题展示本地端口。 */
+.brand-block p {
+  margin: 4px 0 0;
+  color: var(--sidebar-muted);
+  font-size: 13px;
+}
+
+/* 主题按钮放在品牌区右侧，只用图标表达当前可执行动作。 */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  margin-left: auto;
+  border: 1px solid var(--sidebar-input-border);
+  border-radius: 8px;
+  color: var(--sidebar-text);
+  background: var(--sidebar-input-bg);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+}
+
+/* 导航使用按钮加图标，保证可点击区域明确。 */
+.nav-tabs {
+  display: grid;
+  gap: 8px;
+}
+
+/* 导航按钮保持统一高度，避免激活态造成布局跳动。 */
+.nav-tabs button,
+.primary-button,
+.secondary-button,
+.danger-button,
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* 侧边导航默认态低调，激活态突出当前工作区。 */
+.nav-tabs button {
+  position: relative;
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  color: var(--nav-text);
+  background: transparent;
+}
+
+/* 当前导航项使用浅色背景，不依赖单一颜色区分。 */
+.nav-tabs button.active {
+  color: var(--nav-active-text);
+  background: var(--nav-active-bg);
+  box-shadow: inset 3px 0 0 var(--primary-bg), 0 0 18px color-mix(in srgb, var(--primary-bg) 16%, transparent);
+}
+
+/* API key 输入在侧栏底部附近保持可访问。 */
+.api-key-field {
+  display: grid;
+  gap: 8px;
+  margin-top: auto;
+}
+
+/* 字段标签用图标辅助识别。 */
+.api-key-field span,
+.config-grid span {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+  color: inherit;
+}
+
+/* 输入控件统一视觉语言。 */
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--input-text);
+  background: var(--input-bg);
+  font: inherit;
+}
+
+/* 侧栏输入与深色背景协调。 */
+.api-key-field input {
+  border-color: var(--sidebar-input-border);
+  color: var(--sidebar-text);
+  background: var(--sidebar-input-bg);
+}
+
+/* 右侧工作区使用充足边距，承载三个主要页面。 */
+.workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  padding: 24px;
+}
+
+/* 顶部错误提示占据独立区域，避免遮挡内容。 */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 8px;
+}
+
+/* 错误提示使用暖色，但不污染整体配色。 */
+.banner.error {
+  color: var(--error-text);
+  background: var(--error-bg);
+}
+
+/* 聊天布局占满剩余高度，输入框固定在底部。 */
+.chat-layout,
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 48px);
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  box-shadow:
+    0 18px 60px rgba(0, 0, 0, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* 工具栏放置标题、状态和操作控件。 */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--panel-divider);
+  background: color-mix(in srgb, var(--panel-bg) 88%, transparent);
+}
+
+/* 标题大小适配工具区域，不使用 hero 级字号。 */
+.toolbar h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+/* 状态文字保持次级。 */
+.toolbar p {
+  margin: 4px 0 0;
+  color: var(--page-muted);
+  font-size: 13px;
+}
+
+/* 看板内容用紧凑网格承载指标和趋势，避免占用聊天区域的心智空间。 */
+.dashboard-content {
+  display: grid;
+  gap: 18px;
+  padding: 18px;
+  overflow: auto;
+}
+
+/* 关键指标是重复信息卡，固定高度防止数字变化造成跳动。 */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+/* 指标卡只展示一个主数字和一个短标签，保持高密度扫描。 */
+.metric-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 92px;
+  padding: 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--chat-bg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* 指标图标提供类型锚点，不使用额外说明文字。 */
+.metric-icon {
+  display: inline-flex;
+  width: 38px;
+  height: 38px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--primary-text);
+  background: var(--primary-bg);
+  box-shadow: 0 0 22px color-mix(in srgb, var(--primary-bg) 32%, transparent);
+}
+
+/* 指标标签保持次级，主数字保持醒目。 */
+.metric-card p {
+  margin: 0 0 4px;
+  color: var(--page-muted);
+  font-size: 13px;
+}
+
+/* 指标数字限制字号，避免大 token 数压迫布局。 */
+.metric-card strong {
+  color: var(--page-title);
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+/* 看板中段分为 token 结构和趋势，两块等宽便于比较。 */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: 18px;
+}
+
+/* 看板分区使用轻边界，不做浮动卡片效果。 */
+.dashboard-section {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+/* 分区标题行同时承载摘要数字。 */
+.section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--panel-divider);
+  padding-bottom: 10px;
+}
+
+/* 分区标题不使用大字号，保持工具台层级。 */
+.section-heading h3 {
+  margin: 0;
+  color: var(--page-title);
+  font-size: 16px;
+}
+
+/* 分区摘要作为弱信息展示。 */
+.section-heading span {
+  color: var(--page-muted);
+  font-size: 13px;
+}
+
+/* Token 拆分列表保持稳定行距。 */
+.token-breakdown {
+  display: grid;
+  gap: 12px;
+}
+
+/* 每个 token 类型是一行标签加进度条。 */
+.token-row {
+  display: grid;
+  gap: 7px;
+}
+
+/* token 行头左右展示名称和数值。 */
+.token-row-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--page-muted);
+  font-size: 13px;
+}
+
+/* token 数值在行内加粗，减少用户寻找成本。 */
+.token-row-head strong {
+  color: var(--page-title);
+}
+
+/* 进度条轨道使用固定高度，避免百分比变化影响布局。 */
+.token-track {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--pill-bg);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+/* 进度条填充宽度由 React 计算。 */
+.token-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+}
+
+/* 各 token 类型使用不同功能色。 */
+.token-fill.input {
+  background: var(--token-input);
+}
+
+.token-fill.output {
+  background: var(--token-output);
+}
+
+.token-fill.reasoning {
+  background: var(--token-reasoning);
+}
+
+.token-fill.cached {
+  background: var(--token-cached);
+}
+
+/* 趋势图使用纯 CSS 小柱，避免引入图表库增加体积。 */
+.trend-chart {
+  display: flex;
+  align-items: end;
+  gap: 6px;
+  height: 170px;
+  min-width: 0;
+  padding: 12px 4px 0;
+  border-bottom: 1px solid var(--panel-divider);
+}
+
+/* 单个趋势柱用 token 数控制高度。 */
+.trend-bar {
+  flex: 1;
+  min-width: 6px;
+  max-width: 28px;
+  border-radius: 6px 6px 0 0;
+  background: var(--primary-bg);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--primary-bg) 34%, transparent);
+}
+
+/* 失败请求在趋势图中用错误色标记。 */
+.trend-bar.failed {
+  background: var(--status-fail-text);
+}
+
+/* 无数据时趋势区域保持高度，避免页面跳动。 */
+.trend-empty {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  color: var(--page-muted);
+  font-size: 13px;
+}
+
+/* 健康摘要用横向条收尾，补充指标之外的运行状态。 */
+.health-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  border-top: 1px solid var(--panel-divider);
+  padding-top: 14px;
+}
+
+/* 摘要条目保持胶囊形态，适合扫描状态。 */
+.health-strip span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 11px;
+  border-radius: 8px;
+  color: var(--pill-text);
+  background: var(--pill-bg);
+  font-size: 13px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+/* 摘要数值比标签更醒目。 */
+.health-strip strong {
+  color: var(--page-title);
+}
+
+/* 工具栏右侧控件保持可换行。 */
+.control-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* 聊天页的快速模式开关和模型控件保持同一工具栏密度。 */
+.compact-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  color: var(--input-text);
+  background: var(--input-bg);
+  cursor: pointer;
+}
+
+/* 工具栏复选框使用原生尺寸，避免撑高控件。 */
+.compact-toggle input {
+  width: auto;
+  margin: 0;
+}
+
+/* 快速模式标签带图标，和其他工具按钮保持一致。 */
+.compact-toggle span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+/* 聊天流区域滚动显示消息。 */
+.chat-stream {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+  padding: 18px;
+  background: var(--chat-bg);
+}
+
+/* 空态保持克制，不做落地页式介绍。 */
+.empty-state {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  min-height: 260px;
+  color: var(--page-muted);
+  text-align: center;
+}
+
+/* 空态标题控制在面板字号。 */
+.empty-state h3 {
+  margin: 0;
+  color: var(--page-title);
+  font-size: 18px;
+}
+
+/* 空态说明保持短句。 */
+.empty-state p {
+  margin: 0;
+}
+
+/* 消息气泡使用最大宽度，保证长文本可读。 */
+.message {
+  position: relative;
+  width: min(820px, 100%);
+  padding: 14px 44px 14px 14px;
+  border: 1px solid var(--message-border);
+  border-radius: 8px;
+  background: var(--message-bg);
+}
+
+/* 用户消息右对齐并使用蓝色系强调。 */
+.message.user {
+  align-self: flex-end;
+  border-color: var(--user-message-border);
+  background: var(--user-message-bg);
+}
+
+/* 助手消息左对齐，保持阅读区域稳定。 */
+.message.assistant {
+  align-self: flex-start;
+}
+
+/* 消息角色标签提供快速扫描锚点。 */
+.message-role {
+  margin-bottom: 6px;
+  color: var(--message-role);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* 消息正文保留换行和长词断行。 */
+.message p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+
+/* 图标按钮用于复制等局部操作。 */
+.icon-button {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 30px;
+  height: 30px;
+  color: var(--message-role);
+  background: var(--icon-bg);
+}
+
+/* 输入区域固定在聊天面板底部。 */
+.composer {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-top: 1px solid var(--panel-divider);
+  background: var(--panel-bg);
+}
+
+/* 文本输入高度固定，避免输入过程中布局跳动。 */
+.composer textarea {
+  min-height: 92px;
+  max-height: 180px;
+  resize: vertical;
+}
+
+/* 输入区操作行在窄屏可换行。 */
+.composer-actions,
+.save-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  align-items: center;
+}
+
+/* usage 显示做成紧凑状态胶囊。 */
+.usage-pill,
+.saved-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: var(--pill-text);
+  background: var(--pill-bg);
+  font-size: 13px;
+}
+
+/* 主按钮使用电蓝色，强化科技控制台感。 */
+.primary-button {
+  min-height: 38px;
+  padding: 0 14px;
+  color: var(--primary-text);
+  background: var(--primary-bg);
+  font-weight: 700;
+}
+
+/* 次按钮保持安静，适合刷新和重试。 */
+.secondary-button {
+  min-height: 38px;
+  padding: 0 14px;
+  color: var(--secondary-text);
+  background: var(--secondary-bg);
+  border: 1px solid var(--secondary-border);
+}
+
+/* 危险按钮用于停止流式请求。 */
+.danger-button {
+  min-height: 38px;
+  padding: 0 14px;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+}
+
+/* 禁用按钮显示不可操作状态。 */
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* 表格外层负责横向滚动，移动端不挤压列。 */
+.table-wrap {
+  overflow: auto;
+  padding: 8px 18px 18px;
+}
+
+/* 日志表格用于高密度扫描请求元数据。 */
+table {
+  width: 100%;
+  min-width: 980px;
+  border-collapse: collapse;
+}
+
+/* 表格单元格使用细边界和紧凑行高。 */
+th,
+td {
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--table-border);
+  text-align: left;
+  font-size: 14px;
+}
+
+/* 表头颜色更浅，突出数据行。 */
+th {
+  color: var(--table-head);
+  font-weight: 700;
+}
+
+/* 状态码使用色块辅助识别成功与失败。 */
+.status-ok,
+.status-fail {
+  display: inline-flex;
+  min-width: 48px;
+  justify-content: center;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-weight: 700;
+}
+
+/* 成功状态色。 */
+.status-ok {
+  color: var(--status-ok-text);
+  background: var(--status-ok-bg);
+}
+
+/* 失败状态色。 */
+.status-fail {
+  color: var(--status-fail-text);
+  background: var(--status-fail-bg);
+}
+
+/* 错误摘要限制单元格宽度，避免长上游错误挤压整张表。 */
+.error-cell {
+  max-width: 260px;
+  overflow: hidden;
+  color: var(--page-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 配置表单使用响应式网格。 */
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding: 18px;
+}
+
+/* 配置字段标签和控件纵向排列。 */
+.config-grid label {
+  display: grid;
+  gap: 8px;
+}
+
+/* 开关行跨列显示，避免和文本输入混淆。 */
+.toggle-line {
+  grid-column: 1 / -1;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+/* 复选框保持原生尺寸。 */
+.toggle-line input {
+  width: auto;
+}
+
+/* 保存区域在配置面板底部。 */
+.save-row {
+  margin-top: auto;
+  padding: 14px 18px;
+  border-top: 1px solid var(--panel-divider);
+}
+
+/* 窄屏下侧栏改为顶部，保证移动设备可用。 */
+@media (max-width: 820px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: static;
+    padding: 16px;
+  }
+
+  .nav-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .nav-tabs button {
+    justify-content: center;
+  }
+
+  .workspace {
+    padding: 14px;
+  }
+
+  .toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .metric-grid,
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .metric-card {
+    min-height: 78px;
+  }
+
+  .trend-chart {
+    height: 140px;
+  }
+
+  .config-grid {
+    grid-template-columns: 1fr;
+  }
+}
