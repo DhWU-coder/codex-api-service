@@ -270,6 +270,8 @@ async def test_local_api_key_is_required_when_configured(tmp_path: Path) -> None
 
     # 未授权返回 401，正确 Bearer token 可以访问。
     assert denied.status_code == 401
+    assert denied.json()["error"]["type"] == "authentication_error"
+    assert denied.json()["error"]["message"] == "Unauthorized"
     assert allowed.status_code == 200
 
 
@@ -322,8 +324,9 @@ async def test_chat_non_stream_returns_json_error_when_codex_response_is_unexpec
     # 服务端用 502 表示上游响应异常，并保留响应片段用于排查。
     assert response.status_code == 502
     assert response.headers["content-type"].startswith("application/json")
-    assert "Unexpected Codex response" in response.json()["detail"]
-    assert "upstream unavailable" in response.json()["detail"]
+    assert response.json()["error"]["type"] == "api_error"
+    assert "Unexpected Codex response" in response.json()["error"]["message"]
+    assert "upstream unavailable" in response.json()["error"]["message"]
 
     # 请求日志同样记录失败，方便控制台日志页查看。
     item = requests.json()["items"][0]

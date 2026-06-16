@@ -15,6 +15,7 @@ Supported endpoints and features:
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
 - `GET /ui` local console
+- `GET /admin/health` console runtime status
 - Non-streaming responses and `stream: true` SSE streaming
 - Successful requests can be written to `.codex-usage/usage.jsonl`
 
@@ -229,8 +230,11 @@ http://127.0.0.1:1219/ui
 The console includes three pages:
 
 - Chat: stream chat directly through `/v1/chat/completions`.
-- Request logs: inspect recent endpoints, models, status codes, latency, and token usage.
-- Configuration: edit common `config.yaml` fields. Restart the service after saving.
+- Request logs: inspect recent endpoints, models, status codes, latency, and token usage, with filtering and expandable details.
+- Configuration: edit common `config.yaml` fields. Model, reasoning, fast mode, usage logging, and API key changes apply immediately.
+- Status strip: show OAuth, Fast, usage logging, and Codex CLI version status.
+
+The chat page supports Markdown fenced code blocks and per-block copy actions.
 
 The public repository does not commit `codex_api_service/static/ui/` build output.
 After the first clone, or after editing `frontend/`, rebuild the console:
@@ -302,6 +306,14 @@ When the Codex backend returns real usage data, the service appends it to:
 
 The log only stores token statistics and runtime metadata.
 It does not record prompts, completions, OAuth tokens, API keys, Authorization headers, or full request and response bodies.
+
+Console request logs are persisted to:
+
+```text
+./logs/requests.jsonl
+```
+
+This log also stores request metadata only, without prompts or response bodies.
 
 ## Tests
 

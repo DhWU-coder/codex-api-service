@@ -1,4 +1,4 @@
-import type { AdminConfig, ParsedChatStreamEvent, RequestLogItem } from "./types";
+import type { AdminConfig, AdminHealth, ParsedChatStreamEvent, RequestLogItem } from "./types";
 
 // 构造本地服务 Bearer 鉴权头；空 key 不发送 Authorization。
 export function buildAuthHeaders(apiKey: string): Record<string, string> {
@@ -54,13 +54,16 @@ export async function fetchAdminConfig(apiKey: string): Promise<AdminConfig> {
     headers: buildAuthHeaders(apiKey)
   });
   if (!response.ok) {
-    throw new Error(`配置读取失败：${response.status}`);
+    throw new Error(`配置读取失败：${await responseErrorMessage(response)}`);
   }
   return (await response.json()) as AdminConfig;
 }
 
 // 保存控制台支持的配置字段。
-export async function saveAdminConfig(apiKey: string, patch: unknown): Promise<{ restart_required: boolean }> {
+export async function saveAdminConfig(
+  apiKey: string,
+  patch: unknown
+): Promise<{ restart_required: boolean; applied?: boolean }> {
   const response = await fetch("/admin/config", {
     method: "PATCH",
     headers: {
@@ -70,9 +73,20 @@ export async function saveAdminConfig(apiKey: string, patch: unknown): Promise<{
     body: JSON.stringify(patch)
   });
   if (!response.ok) {
-    throw new Error(`配置保存失败：${response.status}`);
+    throw new Error(`配置保存失败：${await responseErrorMessage(response)}`);
   }
-  return (await response.json()) as { restart_required: boolean };
+  return (await response.json()) as { restart_required: boolean; applied?: boolean };
+}
+
+// 读取管理台运行健康状态。
+export async function fetchAdminHealth(apiKey: string): Promise<AdminHealth> {
+  const response = await fetch("/admin/health", {
+    headers: buildAuthHeaders(apiKey)
+  });
+  if (!response.ok) {
+    throw new Error(`状态读取失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as AdminHealth;
 }
 
 // 读取最近 API 请求日志；limit 用于看板拉取更多统计样本。
@@ -81,8 +95,24 @@ export async function fetchRequestLogs(apiKey: string, limit = 100): Promise<Req
     headers: buildAuthHeaders(apiKey)
   });
   if (!response.ok) {
-    throw new Error(`请求日志读取失败：${response.status}`);
+    throw new Error(`请求日志读取失败：${await responseErrorMessage(response)}`);
   }
   const body = (await response.json()) as { items: RequestLogItem[] };
   return body.items;
+}
+
+// 兼容 OpenAI error envelope 和普通 HTTP 状态文本，给 UI 展示更具体的错误。
+async function responseErrorMessage(response: Response): Promise<string> {
+  try {
+    const body = (await response.clone().json()) as { error?: { message?: string }; detail?: string };
+    if (typeof body.error?.message === "string") {
+      return body.error.message;
+    }
+    if (typeof body.detail === "string") {
+      return body.detail;
+    }
+  } catch {
+    // 响应不是 JSON 时退回到 HTTP 状态码。
+  }
+  return String(response.status);
 }

@@ -17,17 +17,18 @@ import {
   Square,
   Zap
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   buildAuthHeaders,
+  fetchAdminHealth,
   fetchAdminConfig,
   fetchRequestLogs,
   parseChatStreamLine,
   saveAdminConfig
 } from "./api";
 import { formatCompactNumber, formatDuration, summarizeRequestLogs } from "./dashboard";
-import type { AdminConfig, ChatMessage, ChatUsage, RequestLogItem } from "./types";
+import type { AdminConfig, AdminHealth, ChatMessage, ChatUsage, RequestLogItem } from "./types";
 
 // 顶部导航标签的枚举，保持状态值简短稳定。
 type ActiveTab = "dashboard" | "chat" | "logs" | "config";
@@ -52,6 +53,7 @@ const TOKEN_BREAKDOWN_ITEMS = [
 // 配置表单只暴露第一版控制台支持安全编辑的字段。
 type ConfigFormState = {
   localApiKey: string;
+  localApiKeyTouched: boolean;
   defaultModel: string;
   reasoningEffort: string;
   fastMode: boolean;
@@ -69,6 +71,7 @@ function newId(prefix: string): string {
 function formFromConfig(config: AdminConfig): ConfigFormState {
   return {
     localApiKey: "",
+    localApiKeyTouched: false,
     defaultModel: config.codex.default_model,
     reasoningEffort: config.codex.reasoning_effort,
     fastMode: config.codex.fast_mode,
@@ -100,6 +103,67 @@ function applyTheme(theme: ThemeMode): void {
   document.documentElement.style.colorScheme = theme;
 }
 
+// 侧栏展示真实访问地址，反代或端口变化时比配置文件更可靠。
+function currentDisplayHost(): string {
+  return window.location.host || "127.0.0.1:1219";
+}
+
+// 消息内容拆成普通文本和 fenced code block 两类，避免使用危险 HTML。
+type MessagePart =
+  | { type: "text"; text: string }
+  | { type: "code"; language: string; code: string };
+
+// 解析最常用的 Markdown fenced code block，其余 Markdown 先保持纯文本渲染。
+function splitMessageParts(content: string): MessagePart[] {
+  const parts: MessagePart[] = [];
+  const fencePattern = /```([^\n`]*)\n([\s\S]*?)```/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = fencePattern.exec(content)) !== null) {
+    const before = content.slice(cursor, match.index);
+    if (before) {
+      parts.push({ type: "text", text: before });
+    }
+    parts.push({ type: "code", language: match[1].trim(), code: match[2].replace(/\n$/, "") });
+    cursor = match.index + match[0].length;
+  }
+  const rest = content.slice(cursor);
+  if (rest) {
+    parts.push({ type: "text", text: rest });
+  }
+  return parts.length ? parts : [{ type: "text", text: content }];
+}
+
+// 渲染消息正文，代码块提供独立复制按钮。
+function MessageContent({ content }: { content: string }) {
+  const parts = splitMessageParts(content);
+  return (
+    <div className="message-content">
+      {parts.map((part, index) =>
+        part.type === "code" ? (
+          <div className="code-block" key={`${part.type}_${index}`}>
+            <div className="code-block-head">
+              <span>{part.language || "code"}</span>
+              <button
+                aria-label="复制代码"
+                className="icon-button inline"
+                onClick={() => void navigator.clipboard.writeText(part.code)}
+              >
+                <Copy size={14} />
+              </button>
+            </div>
+            <pre>
+              <code>{part.code}</code>
+            </pre>
+          </div>
+        ) : (
+          <p key={`${part.type}_${index}`}>{part.text}</p>
+        )
+      )}
+    </div>
+  );
+}
+
 // 本地控制台主组件，包含聊天、日志和配置三个工作区。
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("dashboard");
@@ -115,10 +179,15 @@ export function App() {
   const [status, setStatus] = useState("就绪");
   const [error, setError] = useState("");
   const [logs, setLogs] = useState<RequestLogItem[]>([]);
+  const [health, setHealth] = useState<AdminHealth | null>(null);
   const [config, setConfig] = useState<AdminConfig | null>(null);
   const [configForm, setConfigForm] = useState<ConfigFormState | null>(null);
-  const [configSaved, setConfigSaved] = useState(false);
+  const [configSavedNote, setConfigSavedNote] = useState("");
+  const [logSearch, setLogSearch] = useState("");
+  const [logStatusFilter, setLogStatusFilter] = useState("all");
+  const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const chatStreamRef = useRef<HTMLDivElement | null>(null);
 
   // layout effect 可以在浏览器绘制前应用主题，避免启动时闪一下错误主题。
   useLayoutEffect(() => {
@@ -164,6 +233,16 @@ export function App() {
     }
   }, [apiKey]);
 
+  // 读取运行健康状态，驱动侧栏状态条。
+  const loadHealth = useCallback(async () => {
+    try {
+      const loaded = await fetchAdminHealth(apiKey);
+      setHealth(loaded);
+    } catch {
+      setHealth(null);
+    }
+  }, [apiKey]);
+
   // 读取最近请求日志，日志不包含 prompt 和响应正文。
   const loadLogs = useCallback(async () => {
     try {
@@ -179,6 +258,18 @@ export function App() {
   useEffect(() => {
     void loadLogs();
   }, [loadLogs]);
+
+  // 健康状态变化频率低，初始化和访问密钥变化时读取即可。
+  useEffect(() => {
+    void loadHealth();
+  }, [loadHealth]);
+
+  // 流式输出时自动滚动到最新消息。
+  useEffect(() => {
+    if (chatStreamRef.current) {
+      chatStreamRef.current.scrollTop = chatStreamRef.current.scrollHeight;
+    }
+  }, [messages, isStreaming]);
 
   // 发送聊天请求并逐块读取 SSE。
   const sendMessage = useCallback(
@@ -318,9 +409,9 @@ export function App() {
     }
     try {
       setError("");
-      setConfigSaved(false);
-      await saveAdminConfig(apiKey, {
-        api: { local_api_key: configForm.localApiKey },
+      setConfigSavedNote("");
+      const result = await saveAdminConfig(apiKey, {
+        ...(configForm.localApiKeyTouched ? { api: { local_api_key: configForm.localApiKey } } : {}),
         codex: {
           default_model: configForm.defaultModel,
           reasoning_effort: configForm.reasoningEffort,
@@ -332,11 +423,14 @@ export function App() {
           import_auth_path: configForm.importAuthPath
         }
       });
-      setConfigSaved(true);
+      setConfigSavedNote(result.restart_required ? "已保存，重启服务后生效" : "已保存，已立即生效");
+      setConfigForm({ ...configForm, localApiKey: "", localApiKeyTouched: false });
+      void loadConfig();
+      void loadHealth();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "配置保存失败");
     }
-  }, [apiKey, configForm]);
+  }, [apiKey, configForm, loadConfig, loadHealth]);
 
   // Token 拆分按实际组成计算占比；没有 usage 时保持 0 宽度。
   const tokenBreakdownTotal = TOKEN_BREAKDOWN_ITEMS.reduce(
@@ -347,6 +441,26 @@ export function App() {
   // 趋势柱以当前窗口最大 token 为基准，保证小样本也能看出差异。
   const trendMaxTokens = Math.max(...dashboardSummary.trend.map((item) => item.totalTokens), 1);
 
+  // 日志过滤只匹配元数据字段，仍然不读取或展示 prompt。
+  const filteredLogs = useMemo(() => {
+    const query = logSearch.trim().toLowerCase();
+    return logs.filter((item) => {
+      const statusMatches =
+        logStatusFilter === "all" ||
+        (logStatusFilter === "success" && item.status_code < 400) ||
+        (logStatusFilter === "failed" && item.status_code >= 400);
+      const queryText = [item.path, item.model, item.status_code, item.request_id, item.error]
+        .filter((value) => value !== null && value !== undefined)
+        .join(" ")
+        .toLowerCase();
+      return statusMatches && (!query || queryText.includes(query));
+    });
+  }, [logSearch, logStatusFilter, logs]);
+
+  // 状态条用短标签展示运行健康度，避免占用主工作区。
+  const oauthStatus = health?.oauth.available ? "OAuth ready" : "OAuth missing";
+  const usageStatus = health?.usage.enabled ? (health.usage.writable ? "Usage ready" : "Usage blocked") : "Usage off";
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -354,7 +468,7 @@ export function App() {
           <div className="brand-mark">C</div>
           <div>
             <h1>Codex API Console</h1>
-            <p>127.0.0.1:1219</p>
+            <p>{currentDisplayHost()}</p>
           </div>
           <button
             aria-label={theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}
@@ -364,6 +478,13 @@ export function App() {
           >
             {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
           </button>
+        </div>
+
+        <div className="runtime-strip" aria-label="运行状态">
+          <span>{oauthStatus}</span>
+          <span>{fastMode ? "Fast on" : "Fast off"}</span>
+          <span>{usageStatus}</span>
+          <span>{health?.codex.client_version || "Codex unknown"}</span>
         </div>
 
         <nav className="nav-tabs" aria-label="主导航">
@@ -591,7 +712,7 @@ export function App() {
               </div>
             </header>
 
-            <div className="chat-stream">
+            <div className="chat-stream" ref={chatStreamRef}>
               {messages.length === 0 ? (
                 <div className="empty-state">
                   <MessageSquare size={28} />
@@ -600,13 +721,17 @@ export function App() {
                 </div>
               ) : (
                 messages.map((message) => (
-                  <article className={`message ${message.role}`} key={message.id}>
-                    <div className="message-role">{message.role === "user" ? "你" : "Codex"}</div>
-                    <p>{message.content || (message.role === "assistant" ? "正在生成..." : "")}</p>
-                    {message.role === "assistant" && message.content ? (
-                      <button className="icon-button" onClick={() => void navigator.clipboard.writeText(message.content)}>
-                        <Copy size={15} />
-                      </button>
+	                  <article className={`message ${message.role}`} key={message.id}>
+	                    <div className="message-role">{message.role === "user" ? "你" : "Codex"}</div>
+	                    <MessageContent content={message.content || (message.role === "assistant" ? "正在生成..." : "")} />
+	                    {message.role === "assistant" && message.content ? (
+	                      <button
+	                        aria-label="复制消息"
+	                        className="icon-button"
+	                        onClick={() => void navigator.clipboard.writeText(message.content)}
+	                      >
+	                        <Copy size={15} />
+	                      </button>
                     ) : null}
                   </article>
                 ))
@@ -663,6 +788,18 @@ export function App() {
                 刷新
               </button>
             </header>
+            <div className="log-controls">
+              <input
+                value={logSearch}
+                onChange={(event) => setLogSearch(event.target.value)}
+                placeholder="搜索日志"
+              />
+              <select value={logStatusFilter} onChange={(event) => setLogStatusFilter(event.target.value)}>
+                <option value="all">全部状态</option>
+                <option value="success">仅成功</option>
+                <option value="failed">仅失败</option>
+              </select>
+            </div>
             <div className="table-wrap">
               <table>
                 <thead>
@@ -678,26 +815,45 @@ export function App() {
                     <th>推理</th>
                     <th>错误</th>
                   </tr>
-                </thead>
-                <tbody>
-                  {logs.map((item) => (
-                    <tr key={item.id}>
-                      <td>{new Date(item.timestamp).toLocaleTimeString()}</td>
-                      <td>{item.path}</td>
-                      <td>{item.model || "-"}</td>
-                      <td>
-                        <span className={item.status_code < 400 ? "status-ok" : "status-fail"}>{item.status_code}</span>
-                      </td>
-                      <td>{item.duration_ms}ms</td>
-                      <td>{item.usage?.total ?? "-"}</td>
-                      <td>{item.usage?.input ?? "-"}</td>
-                      <td>{item.usage?.output ?? "-"}</td>
-                      <td>{item.usage?.reasoning ?? "-"}</td>
-                      <td className="error-cell">{item.error || "-"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+	                </thead>
+	                <tbody>
+	                  {filteredLogs.map((item) => (
+	                    <Fragment key={item.id}>
+	                      <tr
+	                        className="log-row"
+	                        onClick={() => setExpandedLogId(expandedLogId === item.id ? null : item.id)}
+	                      >
+	                        <td>{new Date(item.timestamp).toLocaleTimeString()}</td>
+	                        <td>{item.path}</td>
+	                        <td>{item.model || "-"}</td>
+	                        <td>
+	                          <span className={item.status_code < 400 ? "status-ok" : "status-fail"}>
+	                            {item.status_code}
+	                          </span>
+	                        </td>
+	                        <td>{item.duration_ms}ms</td>
+	                        <td>{item.usage?.total ?? "-"}</td>
+	                        <td>{item.usage?.input ?? "-"}</td>
+	                        <td>{item.usage?.output ?? "-"}</td>
+	                        <td>{item.usage?.reasoning ?? "-"}</td>
+	                        <td className="error-cell">{item.error || "-"}</td>
+	                      </tr>
+	                      {expandedLogId === item.id ? (
+	                        <tr className="log-detail-row">
+	                          <td colSpan={10}>
+	                            <div className="log-detail">
+	                              <span>request id</span>
+	                              <strong>{item.request_id || "-"}</strong>
+	                              <span>错误</span>
+	                              <strong>{item.error || "-"}</strong>
+	                            </div>
+	                          </td>
+	                        </tr>
+	                      ) : null}
+	                    </Fragment>
+	                  ))}
+	                </tbody>
+	              </table>
             </div>
           </section>
         ) : null}
@@ -722,9 +878,20 @@ export function App() {
                   <input
                     type="password"
                     value={configForm.localApiKey}
-                    placeholder={config?.api.local_api_key_configured ? "已配置，留空会清除" : "未配置"}
-                    onChange={(event) => setConfigForm({ ...configForm, localApiKey: event.target.value })}
+                    placeholder={config?.api.local_api_key_configured ? "已配置，输入新值后保存" : "未配置"}
+                    onChange={(event) =>
+                      setConfigForm({ ...configForm, localApiKey: event.target.value, localApiKeyTouched: true })
+                    }
                   />
+                  {config?.api.local_api_key_configured ? (
+                    <button
+                      className="secondary-button inline-field-button"
+                      type="button"
+                      onClick={() => setConfigForm({ ...configForm, localApiKey: "", localApiKeyTouched: true })}
+                    >
+                      清除 API key
+                    </button>
+                  ) : null}
                 </label>
                 <label>
                   <span>默认模型</span>
@@ -785,10 +952,10 @@ export function App() {
             )}
 
             <div className="save-row">
-              {configSaved ? (
+              {configSavedNote ? (
                 <span className="saved-note">
                   <CheckCircle2 size={16} />
-                  已保存，重启服务后生效
+                  {configSavedNote}
                 </span>
               ) : null}
               <button className="primary-button" onClick={() => void saveConfig()} disabled={!configForm}>

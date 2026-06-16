@@ -183,6 +183,28 @@ body {
   font-size: 13px;
 }
 
+/* 运行状态条用紧凑标签展示服务健康度。 */
+.runtime-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+/* 状态标签保持低噪声，但用边界和微光建立科技控制台质感。 */
+.runtime-strip span {
+  min-width: 0;
+  padding: 7px 9px;
+  overflow: hidden;
+  border: 1px solid var(--sidebar-input-border);
+  border-radius: 8px;
+  color: var(--sidebar-text);
+  background: var(--sidebar-input-bg);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 主题按钮放在品牌区右侧，只用图标表达当前可执行动作。 */
 .theme-toggle {
   display: inline-flex;
@@ -662,6 +684,48 @@ textarea {
   line-height: 1.6;
 }
 
+/* 消息正文容器统一管理段落和代码块间距。 */
+.message-content {
+  display: grid;
+  gap: 10px;
+}
+
+/* 代码块使用深色背景，便于和自然语言区分。 */
+.code-block {
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--sidebar-bg);
+}
+
+/* 代码块头部展示语言和复制动作。 */
+.code-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--sidebar-input-border);
+  color: var(--sidebar-muted);
+  font-size: 12px;
+}
+
+/* 代码内容保留空白并允许横向滚动。 */
+.code-block pre {
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+}
+
+/* code 使用等宽字体，保持代码可读。 */
+.code-block code {
+  color: var(--sidebar-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
 /* 图标按钮用于复制等局部操作。 */
 .icon-button {
   position: absolute;
@@ -671,6 +735,13 @@ textarea {
   height: 30px;
   color: var(--message-role);
   background: var(--icon-bg);
+}
+
+/* 内联图标按钮用于代码块头部，不能使用消息右上角绝对定位。 */
+.icon-button.inline {
+  position: static;
+  width: 28px;
+  height: 28px;
 }
 
 /* 输入区域固定在聊天面板底部。 */
@@ -751,6 +822,15 @@ button:disabled {
   padding: 8px 18px 18px;
 }
 
+/* 日志筛选区提供文本搜索和状态过滤。 */
+.log-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 180px;
+  gap: 10px;
+  padding: 14px 18px 6px;
+  border-bottom: 1px solid var(--panel-divider);
+}
+
 /* 日志表格用于高密度扫描请求元数据。 */
 table {
   width: 100%;
@@ -805,6 +885,36 @@ th {
   white-space: nowrap;
 }
 
+/* 日志行可点击展开详情。 */
+.log-row {
+  cursor: pointer;
+}
+
+/* 日志行悬停时轻微高亮，提示可交互。 */
+.log-row:hover {
+  background: color-mix(in srgb, var(--primary-bg) 8%, transparent);
+}
+
+/* 展开详情行使用弱背景，避免像另一条请求。 */
+.log-detail-row td {
+  background: color-mix(in srgb, var(--panel-bg) 72%, var(--primary-bg) 8%);
+}
+
+/* 请求详情只展示排障元数据，不包含 prompt 或响应正文。 */
+.log-detail {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 8px 12px;
+  color: var(--page-muted);
+}
+
+/* 详情值允许换行，保留完整错误摘要。 */
+.log-detail strong {
+  min-width: 0;
+  color: var(--page-title);
+  overflow-wrap: anywhere;
+}
+
 /* 配置表单使用响应式网格。 */
 .config-grid {
   display: grid;
@@ -817,6 +927,11 @@ th {
 .config-grid label {
   display: grid;
   gap: 8px;
+}
+
+/* 字段内的小按钮用于 API key 清除等局部动作。 */
+.inline-field-button {
+  justify-self: start;
 }
 
 /* 开关行跨列显示，避免和文本输入混淆。 */
@@ -881,6 +996,10 @@ th {
   }
 
   .config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .log-controls {
     grid-template-columns: 1fr;
   }
 }

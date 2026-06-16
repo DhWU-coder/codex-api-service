@@ -14,6 +14,7 @@ http://127.0.0.1:1219/v1
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
 - `GET /ui` 本地控制台
+- `GET /admin/health` 控制台运行状态
 - 非流式和 `stream: true` 流式 SSE
 - 成功响应后写入 `.codex-usage/usage.jsonl`
 
@@ -221,8 +222,11 @@ http://127.0.0.1:1219/ui
 控制台包含三个页面：
 
 - 聊天：直接用本服务的 `/v1/chat/completions` 流式聊天。
-- 请求日志：查看最近请求的接口、模型、状态、耗时和 token 用量。
-- 配置：编辑常用 `config.yaml` 字段，保存后重启服务生效。
+- 请求日志：查看最近请求的接口、模型、状态、耗时和 token 用量，支持筛选和展开详情。
+- 配置：编辑常用 `config.yaml` 字段；模型、reasoning、fast、usage 和 API key 可立即生效。
+- 状态条：展示 OAuth、Fast、usage 写入和 Codex CLI 版本状态。
+
+聊天区支持 Markdown fenced code block 展示和代码块复制。
 
 公开仓库不提交 `codex_api_service/static/ui/` 构建产物。首次克隆或修改 `frontend/` 源码后，需要重新构建控制台：
 
@@ -294,6 +298,14 @@ print(response.output_text)
 ```
 
 日志只包含 token 统计和运行元数据，不记录 prompt、completion、OAuth token、API key、Authorization header 或完整请求/响应正文。
+
+控制台请求日志会持久化到：
+
+```text
+./logs/requests.jsonl
+```
+
+该日志同样只记录请求元数据，不记录 prompt 或响应正文。
 
 ## 测试
 

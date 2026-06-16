@@ -37,6 +37,15 @@ export type AdminConfig = {
   config_path: string;
 };
 
+// 管理台 health 接口返回的运行状态。
+export type AdminHealth = {
+  server: { api: string; console: string };
+  oauth: { available: boolean };
+  usage: { enabled: boolean; writable: boolean; path: string };
+  ui: { built: boolean };
+  codex: { client_version: string; default_model?: string; fast_mode?: boolean };
+};
+
 // 请求日志列表中的单条元数据记录。
 export type RequestLogItem = {
   id: string;

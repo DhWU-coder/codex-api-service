@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 
-from .config import AppConfig
+from .config import AppConfig, load_config
 
 
 def safe_config_snapshot(config: AppConfig) -> dict[str, Any]:
@@ -36,6 +36,7 @@ def patch_config_file(*, project_root: Path, patch: dict[str, Any]) -> dict[str,
     """把 UI 提交的白名单配置写入 config.yaml。"""
     # 读取已有 YAML，保留未被 UI 管理的字段。
     config_path = project_root / "config.yaml"
+    before_config = load_config(project_root=project_root, config_path=config_path)
     current = _read_yaml(config_path)
 
     # 只允许写入控制台明确支持的字段，避免误写复杂配置。
@@ -71,7 +72,13 @@ def patch_config_file(*, project_root: Path, patch: dict[str, Any]) -> dict[str,
         yaml.safe_dump(current, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    return {"restart_required": True, "config_path": str(config_path)}
+    after_config = load_config(project_root=project_root, config_path=config_path)
+    restart_required = _restart_required(before_config, after_config)
+    return {
+        "restart_required": restart_required,
+        "applied": not restart_required,
+        "config_path": str(config_path),
+    }
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -97,3 +104,17 @@ def _empty_to_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _restart_required(before: AppConfig, after: AppConfig) -> bool:
+    """判断配置变更是否必须重启服务才能完整生效。"""
+    # 监听地址和端口由 uvicorn 启动时绑定，运行中不能无损切换。
+    if before.server != after.server:
+        return True
+
+    # OAuth 文件路径变化会影响 CodexAuth 实例，保持重启语义最清晰。
+    if before.auth != after.auth:
+        return True
+
+    # 其余当前 UI 支持的字段都可以在运行中的 app_config/client/logger 上热更新。
+    return False

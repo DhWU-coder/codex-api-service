@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -16,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .admin import patch_config_file, safe_config_snapshot
 from .auth import CodexAuth
-from .codex_client import CodexClient, CodexHTTPStatusError
+from .codex_client import CodexClient, CodexHTTPStatusError, _codex_client_version
 from .config import AppConfig, load_config
 from .openai_compat import (
     build_chat_completion,
@@ -48,8 +49,14 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
     )
     client = codex_client or CodexClient(auth=auth, config=app_config.codex)
     usage_logger = UsageLogger(project_root=app_config.project_root, usage_config=app_config.usage)
-    request_log = RequestLogStore()
+    request_log = RequestLogStore(path=app_config.project_root / "logs" / "requests.jsonl")
     app = FastAPI(title="Codex OpenAI API Service", version="0.1.0")
+
+    @app.exception_handler(HTTPException)
+    async def openai_http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+        """把 FastAPI HTTPException 统一转换成 OpenAI-compatible error envelope。"""
+        message = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail, ensure_ascii=False)
+        return JSONResponse(status_code=exc.status_code, content=_openai_error_payload(message, exc.status_code))
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -163,11 +170,40 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
     @app.patch("/admin/config")
     async def admin_config_patch(request: Request) -> dict[str, Any]:
         """写入控制台支持的配置字段。"""
+        nonlocal app_config
         _require_local_auth(request, app_config)
         body = await request.json()
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="config patch must be an object")
-        return patch_config_file(project_root=app_config.project_root, patch=body)
+        result = patch_config_file(project_root=app_config.project_root, patch=body)
+        if result.get("applied") is True:
+            app_config = load_config(project_root=app_config.project_root)
+            client.config = app_config.codex
+            usage_logger.usage_config = app_config.usage
+            app.state.config = app_config
+        return result
+
+    @app.get("/admin/health")
+    async def admin_health(request: Request) -> dict[str, Any]:
+        """返回控制台状态条需要的运行健康信息。"""
+        _require_local_auth(request, app_config)
+        credentials = auth.load()
+        urls = _startup_urls(app_config)
+        return {
+            "server": urls,
+            "oauth": {"available": credentials is not None},
+            "usage": {
+                "enabled": app_config.usage.enabled,
+                "path": str(app_config.usage.path),
+                "writable": _path_can_be_written(app_config.usage.path),
+            },
+            "ui": {"built": (_ui_static_root() / "index.html").exists()},
+            "codex": {
+                "client_version": _codex_client_version(),
+                "default_model": app_config.codex.default_model,
+                "fast_mode": app_config.codex.fast_mode,
+            },
+        }
 
     @app.get("/admin/requests")
     async def admin_requests(request: Request, limit: int = 100) -> dict[str, Any]:
@@ -425,6 +461,27 @@ def _raise_non_stream_error(
     raise HTTPException(status_code=status_code, detail=message)
 
 
+def _openai_error_payload(message: str, status_code: int) -> dict[str, Any]:
+    """构造 OpenAI-compatible JSON 错误响应。"""
+    return {
+        "error": {
+            "message": message,
+            "type": _openai_error_type(status_code),
+            "param": None,
+            "code": None,
+        }
+    }
+
+
+def _openai_error_type(status_code: int) -> str:
+    """按 HTTP 状态码映射 OpenAI 常见错误类型。"""
+    if status_code == 401:
+        return "authentication_error"
+    if 400 <= status_code < 500:
+        return "invalid_request_error"
+    return "api_error"
+
+
 def _friendly_error_message(error: Exception) -> str:
     """把上游异常转换成前端可展示的短错误。"""
     if isinstance(error, CodexHTTPStatusError):
@@ -455,6 +512,15 @@ def _stream_error_sse(*, message: str, status_code: int) -> str:
 def _duration_ms(started: float) -> int:
     """计算从 started 到当前的毫秒耗时。"""
     return int((time.perf_counter() - started) * 1000)
+
+
+def _path_can_be_written(path: Path) -> bool:
+    """检查目标文件所在路径是否可写，不创建实际日志内容。"""
+    # 父目录不存在时沿着祖先目录向上查找第一个存在的位置。
+    parent = path.parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    return os.access(parent, os.W_OK)
 
 
 def _ui_static_root() -> Path:

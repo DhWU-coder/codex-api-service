@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import json
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -45,9 +47,12 @@ class RequestLogEntry:
 class RequestLogStore:
     """内存环形请求日志，仅用于本地控制台观察最近请求。"""
 
-    def __init__(self, *, max_entries: int = 200) -> None:
+    def __init__(self, *, max_entries: int = 200, path: Path | None = None) -> None:
         """初始化固定容量日志队列。"""
+        # path 存在时同时做 JSONL 持久化，让服务重启后仍能查看最近请求。
+        self.path = path
         self._items: deque[RequestLogEntry] = deque(maxlen=max_entries)
+        self._load_existing_items()
 
     def record(
         self,
@@ -77,6 +82,7 @@ class RequestLogStore:
             error=error,
         )
         self._items.appendleft(entry)
+        self._append_persisted_entry(entry)
         return entry
 
     def list_recent(self, *, limit: int = 100) -> list[dict[str, Any]]:
@@ -84,3 +90,50 @@ class RequestLogStore:
         # limit 防止管理接口一次返回过多数据。
         safe_limit = max(1, min(int(limit), 500))
         return [item.to_dict() for item in list(self._items)[:safe_limit]]
+
+    def _load_existing_items(self) -> None:
+        """从 JSONL 文件加载历史请求元数据。"""
+        # 没有持久化路径或文件缺失时保持纯内存模式。
+        if self.path is None or not self.path.exists():
+            return
+        loaded: list[RequestLogEntry] = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            entry = _entry_from_dict(item)
+            if entry is not None:
+                loaded.append(entry)
+        # 文件按旧到新追加，内存按新到旧展示。
+        for entry in loaded[-self._items.maxlen :]:
+            self._items.appendleft(entry)
+
+    def _append_persisted_entry(self, entry: RequestLogEntry) -> None:
+        """把单条请求元数据追加写入 JSONL。"""
+        # 持久化内容仍然只包含元数据，不包含 prompt、completion 或密钥。
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(entry.to_dict(), ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def _entry_from_dict(item: dict[str, Any]) -> RequestLogEntry | None:
+    """把持久化 JSON object 恢复成 RequestLogEntry。"""
+    # 历史文件可能被手动编辑或损坏，字段不完整时跳过该行。
+    try:
+        return RequestLogEntry(
+            id=str(item["id"]),
+            timestamp=str(item["timestamp"]),
+            method=str(item["method"]),
+            path=str(item["path"]),
+            model=item["model"] if isinstance(item.get("model"), str) else None,
+            status_code=int(item["status_code"]),
+            duration_ms=int(item["duration_ms"]),
+            usage=item["usage"] if isinstance(item.get("usage"), dict) else None,
+            request_id=item["request_id"] if isinstance(item.get("request_id"), str) else None,
+            error=item["error"] if isinstance(item.get("error"), str) else None,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None

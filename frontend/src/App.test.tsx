@@ -20,6 +20,18 @@ const adminConfig = {
   config_path: "config.yaml"
 };
 
+// 管理台 health 响应用于驱动运行状态条。
+const adminHealth = {
+  server: {
+    api: "http://127.0.0.1:1219/v1",
+    console: "http://127.0.0.1:1219/ui"
+  },
+  oauth: { available: true },
+  usage: { enabled: true, writable: true, path: ".codex-usage/usage.jsonl" },
+  ui: { built: true },
+  codex: { client_version: "0.136.0" }
+};
+
 // 看板测试用的请求日志，模拟后端 /admin/requests 返回值。
 const requestLogItems = [
   {
@@ -92,8 +104,14 @@ describe("App theme mode", () => {
         if (url.startsWith("/admin/requests")) {
           return new Response(JSON.stringify({ items: requestLogItems }), { status: 200 });
         }
+        if (url === "/admin/health") {
+          return new Response(JSON.stringify(adminHealth), { status: 200 });
+        }
         if (url === "/v1/chat/completions") {
-          return new Response("data: [DONE]\n\n", { status: 200, headers: { "Content-Type": "text/event-stream" } });
+          const streamBody =
+            'data: {"choices":[{"delta":{"content":"```python\\nprint(1)\\n```"}}],"usage":null}\n\n' +
+            "data: [DONE]\n\n";
+          return new Response(streamBody, { status: 200, headers: { "Content-Type": "text/event-stream" } });
         }
         if (url === "/admin/config" && method === "PATCH") {
           return new Response(JSON.stringify({ restart_required: true }), { status: 200 });
@@ -128,9 +146,22 @@ describe("App theme mode", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "数据看板" })).toBeTruthy();
+    expect(await screen.findByText(window.location.host)).toBeTruthy();
+    expect(await screen.findByText("OAuth ready")).toBeTruthy();
     expect(await screen.findByText("累计 tokens")).toBeTruthy();
     expect(await screen.findByText("60")).toBeTruthy();
     expect(await screen.findByText("100%")).toBeTruthy();
+  });
+
+  it("renders streamed markdown code blocks with a copy action", async () => {
+    // 聊天输出包含代码块时，应渲染为 code/pre，而不是普通段落文本。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "聊天" }));
+    fireEvent.change(screen.getByPlaceholderText("输入消息..."), { target: { value: "code please" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("print(1)", { selector: "code" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "复制代码" })).toBeTruthy();
   });
 
   it("sends the selected fast mode with chat requests", async () => {
@@ -167,6 +198,21 @@ describe("App theme mode", () => {
         (request) => request.url === "/admin/config" && request.method === "PATCH"
       );
       expect(patchRequest?.body).toMatchObject({ codex: { fast_mode: false } });
+      expect(patchRequest?.body).not.toHaveProperty("api");
     });
+  });
+
+  it("filters and expands request logs", async () => {
+    // 日志页应支持按文本过滤，并能展开查看 request id 和完整错误字段。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "请求日志" }));
+    fireEvent.change(await screen.findByPlaceholderText("搜索日志"), { target: { value: "/v1/responses" } });
+
+    expect(await screen.findByText("/v1/responses")).toBeTruthy();
+    expect(screen.queryByText("/v1/chat/completions")).toBeNull();
+
+    fireEvent.click(screen.getByText("/v1/responses"));
+    expect(await screen.findByText("request id")).toBeTruthy();
+    expect(await screen.findByText("resp_1")).toBeTruthy();
   });
 });
