@@ -113,9 +113,13 @@ Print the effective configuration without secrets:
 python -m codex_api_service.app --print-config
 ```
 
-## Run as a macOS Background Service
+## Run as a Background Service
 
-The project includes launchd scripts. Install and start the service with:
+Background service scripts prefer the project `.venv`. If the virtual environment is missing, they print a `WARNING` and fall back to global Python.
+
+### macOS
+
+macOS uses a launchd user service. Install and start it with:
 
 ```bash
 bash scripts/install_launchd_service.sh
@@ -145,6 +149,73 @@ Log files:
 ```text
 ./logs/launchd.out.log
 ./logs/launchd.err.log
+```
+
+### Ubuntu
+
+Ubuntu uses a systemd user service and does not require sudo. Install and start it with:
+
+```bash
+bash scripts/install_systemd_user_service.sh
+```
+
+The service name is:
+
+```text
+codex-api-service.service
+```
+
+Common management commands:
+
+```bash
+# Check status.
+systemctl --user status codex-api-service.service
+
+# Restart the service.
+systemctl --user restart codex-api-service.service
+
+# Follow live logs.
+journalctl --user -u codex-api-service -f
+
+# Stop and uninstall the service.
+bash scripts/uninstall_systemd_user_service.sh
+```
+
+### Windows
+
+Windows uses a per-user Task Scheduler task. Run this from PowerShell in the project directory:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_windows_task.ps1
+```
+
+The task name is:
+
+```text
+CodexApiService
+```
+
+Common management commands:
+
+```powershell
+# Inspect the task.
+Get-ScheduledTask -TaskName CodexApiService
+
+# Start the task manually.
+Start-ScheduledTask -TaskName CodexApiService
+
+# Stop the task.
+Stop-ScheduledTask -TaskName CodexApiService
+
+# Stop and uninstall the task.
+powershell -ExecutionPolicy Bypass -File scripts\uninstall_windows_task.ps1
+```
+
+Log files:
+
+```text
+.\logs\windows.out.log
+.\logs\windows.err.log
 ```
 
 ## Local Console

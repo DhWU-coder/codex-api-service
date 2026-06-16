@@ -105,9 +105,13 @@ curl http://127.0.0.1:1219/v1/models
 python -m codex_api_service.app --print-config
 ```
 
-## 挂成 macOS 后台服务
+## 挂成后台服务
 
-项目已经提供 launchd 脚本。安装并启动：
+后台服务脚本会优先使用项目 `.venv`；如果找不到虚拟环境，会打印 `WARNING` 并回退到全局 Python。
+
+### macOS
+
+macOS 使用 launchd 用户服务。安装并启动：
 
 ```bash
 bash scripts/install_launchd_service.sh
@@ -137,6 +141,73 @@ bash scripts/uninstall_launchd_service.sh
 ```text
 ./logs/launchd.out.log
 ./logs/launchd.err.log
+```
+
+### Ubuntu
+
+Ubuntu 使用 systemd 用户服务，不需要 sudo。安装并启动：
+
+```bash
+bash scripts/install_systemd_user_service.sh
+```
+
+安装后服务名是：
+
+```text
+codex-api-service.service
+```
+
+常用管理命令：
+
+```bash
+# 查看状态。
+systemctl --user status codex-api-service.service
+
+# 重启服务。
+systemctl --user restart codex-api-service.service
+
+# 查看实时日志。
+journalctl --user -u codex-api-service -f
+
+# 停止并卸载服务。
+bash scripts/uninstall_systemd_user_service.sh
+```
+
+### Windows
+
+Windows 使用当前用户的 Task Scheduler 计划任务。用 PowerShell 在项目目录执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_windows_task.ps1
+```
+
+安装后任务名是：
+
+```text
+CodexApiService
+```
+
+常用管理命令：
+
+```powershell
+# 查看任务。
+Get-ScheduledTask -TaskName CodexApiService
+
+# 手动启动任务。
+Start-ScheduledTask -TaskName CodexApiService
+
+# 停止任务。
+Stop-ScheduledTask -TaskName CodexApiService
+
+# 停止并卸载任务。
+powershell -ExecutionPolicy Bypass -File scripts\uninstall_windows_task.ps1
+```
+
+日志位置：
+
+```text
+.\logs\windows.out.log
+.\logs\windows.err.log
 ```
 
 ## 本地控制台
