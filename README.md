@@ -1,5 +1,7 @@
 # codex-api-service
 
+[English README](README_en.md)
+
 本项目把本机 Codex OAuth 登录封装成 OpenAI-compatible API 服务，默认监听：
 
 ```text
