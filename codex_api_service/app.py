@@ -49,7 +49,10 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
     )
     client = codex_client or CodexClient(auth=auth, config=app_config.codex)
     usage_logger = UsageLogger(project_root=app_config.project_root, usage_config=app_config.usage)
-    request_log = RequestLogStore(path=app_config.project_root / "logs" / "requests.jsonl")
+    request_log = RequestLogStore(
+        path=app_config.project_root / "logs" / "requests.jsonl",
+        usage_path=app_config.usage.path,
+    )
     app = FastAPI(title="Codex OpenAI API Service", version="0.1.0")
 
     @app.exception_handler(HTTPException)

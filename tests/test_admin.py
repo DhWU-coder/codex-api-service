@@ -194,6 +194,47 @@ async def test_admin_requests_survive_app_restart(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_admin_requests_imports_existing_usage_history(tmp_path: Path) -> None:
+    """验证旧版 usage 历史在没有请求日志文件时也能进入看板统计。"""
+    # 旧版本只写 codex-usage 日志，没有 logs/requests.jsonl，请求看板应能读回这类历史。
+    usage_path = tmp_path / ".codex-usage" / "usage.jsonl"
+    usage_path.parent.mkdir(parents=True)
+    usage_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "codex-usage.project-log.v1",
+                "timestamp": "2026-06-16T16:31:52.406Z",
+                "source": "codex-oauth",
+                "channel": "Codex OAuth",
+                "project_root": str(tmp_path),
+                "cwd": str(tmp_path),
+                "session_id": "run-history",
+                "model": "gpt-5.5",
+                "usage": {"total": 9332, "input": 8798, "cached": 7424, "output": 534, "reasoning": 505},
+                "request_id": "resp_history",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    app = create_app(config=make_admin_config(tmp_path), codex_client=AdminFakeCodexClient())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/admin/requests")
+
+    # 历史 usage 会被转换为只含元数据的请求记录，不会暴露 prompt 或响应正文。
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"][0]["id"] == "req_usage_resp_history"
+    assert body["items"][0]["path"] == "/usage/history"
+    assert body["items"][0]["model"] == "gpt-5.5"
+    assert body["items"][0]["status_code"] == 200
+    assert body["items"][0]["usage"]["total"] == 9332
+    assert "hello" not in json.dumps(body, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
 async def test_ui_route_serves_html_shell(tmp_path: Path) -> None:
     """验证 /ui 可以返回前端壳页面。"""
     # 即使前端尚未构建，后端也应返回一个可读的提示页。

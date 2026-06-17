@@ -20,7 +20,7 @@ const adminConfig = {
   config_path: "config.yaml"
 };
 
-// 管理台 health 响应用于驱动运行状态条。
+// 管理台 health 响应用于驱动左侧中文服务状态和配置页运行详情。
 const adminHealth = {
   server: {
     api: "http://127.0.0.1:1219/v1",
@@ -62,9 +62,11 @@ const requestLogItems = [
 
 describe("App theme mode", () => {
   let capturedRequests: Array<{ url: string; method: string; body: unknown }> = [];
+  let healthEndpointAvailable = true;
 
   beforeEach(() => {
     capturedRequests = [];
+    healthEndpointAvailable = true;
 
     // 用内存版 localStorage 规避 jsdom 在当前环境里的存储实现差异。
     const memoryStorage = new Map<string, string>();
@@ -105,6 +107,9 @@ describe("App theme mode", () => {
           return new Response(JSON.stringify({ items: requestLogItems }), { status: 200 });
         }
         if (url === "/admin/health") {
+          if (!healthEndpointAvailable) {
+            return new Response(JSON.stringify({ detail: "Not Found" }), { status: 404 });
+          }
           return new Response(JSON.stringify(adminHealth), { status: 200 });
         }
         if (url === "/v1/chat/completions") {
@@ -147,10 +152,40 @@ describe("App theme mode", () => {
 
     expect(await screen.findByRole("heading", { name: "数据看板" })).toBeTruthy();
     expect(await screen.findByText(window.location.host)).toBeTruthy();
-    expect(await screen.findByText("OAuth ready")).toBeTruthy();
+    expect(await screen.findByText("服务状态")).toBeTruthy();
+    expect(await screen.findByText("正常")).toBeTruthy();
+    expect(screen.queryByText("OAuth ready")).toBeNull();
     expect(await screen.findByText("累计 tokens")).toBeTruthy();
     expect(await screen.findByText("60")).toBeTruthy();
     expect(await screen.findByText("100%")).toBeTruthy();
+  });
+
+  it("moves detailed runtime status to the config page", async () => {
+    // 左侧只保留中文汇总，完整运行状态集中放到配置页便于理解。
+    render(<App />);
+    expect(await screen.findByText("服务状态")).toBeTruthy();
+    expect(screen.queryByText("OAuth ready")).toBeNull();
+
+    fireEvent.click(await screen.findByRole("button", { name: "配置" }));
+    expect(await screen.findByRole("heading", { name: "运行状态" })).toBeTruthy();
+    expect(await screen.findByText("登录：已检测到")).toBeTruthy();
+    expect(await screen.findByText("速度：快速")).toBeTruthy();
+    expect(await screen.findByText("用量：正常")).toBeTruthy();
+    expect(await screen.findByText("CLI：0.136.0")).toBeTruthy();
+  });
+
+  it("shows restart guidance when the runtime health endpoint is unavailable", async () => {
+    // 旧后端没有 /admin/health 时，应明确提示重启服务，而不是一直显示读取中。
+    healthEndpointAvailable = false;
+    render(<App />);
+
+    expect(await screen.findByText("需要更新")).toBeTruthy();
+    expect(await screen.findByText("运行状态接口不可用，请重启服务")).toBeTruthy();
+
+    fireEvent.click(await screen.findByRole("button", { name: "配置" }));
+    expect(await screen.findByText("登录：未读取")).toBeTruthy();
+    expect(await screen.findByText("用量：未读取")).toBeTruthy();
+    expect(await screen.findByText("CLI：未读取")).toBeTruthy();
   });
 
   it("renders streamed markdown code blocks with a copy action", async () => {

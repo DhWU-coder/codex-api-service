@@ -183,26 +183,47 @@ body {
   font-size: 13px;
 }
 
-/* 运行状态条用紧凑标签展示服务健康度。 */
-.runtime-strip {
+/* 左侧只展示一个中文运行摘要，降低技术噪声。 */
+.runtime-summary {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-/* 状态标签保持低噪声，但用边界和微光建立科技控制台质感。 */
-.runtime-strip span {
-  min-width: 0;
-  padding: 7px 9px;
-  overflow: hidden;
+  gap: 5px;
+  padding: 11px 12px;
   border: 1px solid var(--sidebar-input-border);
   border-radius: 8px;
-  color: var(--sidebar-text);
   background: var(--sidebar-input-bg);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03),
+    0 0 20px color-mix(in srgb, var(--primary-bg) 9%, transparent);
+}
+
+/* 摘要标签保持弱化，让真正状态值更醒目。 */
+.runtime-summary-label {
+  color: var(--sidebar-muted);
   font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+/* 中文状态值使用明确字重，便于快速扫视。 */
+.runtime-summary strong {
+  color: var(--sidebar-text);
+  font-size: 17px;
+  line-height: 1.15;
+}
+
+/* 状态说明补充下一步动作，不再暴露 OAuth/CLI 等英文缩写。 */
+.runtime-summary small {
+  color: var(--sidebar-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+/* 异常状态用细微暖色边界提示，不抢占主工作区注意力。 */
+.runtime-summary.attention {
+  border-color: color-mix(in srgb, var(--danger-bg) 42%, var(--sidebar-input-border));
+}
+
+/* 正常状态用主色微光，让状态卡和科技风主视觉保持一致。 */
+.runtime-summary.ok {
+  border-color: color-mix(in srgb, var(--primary-bg) 46%, var(--sidebar-input-border));
 }
 
 /* 主题按钮放在品牌区右侧，只用图标表达当前可执行动作。 */
@@ -923,6 +944,58 @@ th {
   padding: 18px;
 }
 
+/* 配置页承接完整运行状态，把左侧隐藏掉的技术细节集中展示。 */
+.runtime-detail-panel {
+  display: grid;
+  gap: 14px;
+  margin: 18px 18px 0;
+  padding: 15px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-bg) 88%, var(--primary-bg) 4%);
+}
+
+/* 运行状态标题和说明保持紧凑，避免挤压配置表单。 */
+.runtime-detail-head {
+  display: grid;
+  gap: 4px;
+}
+
+/* 配置页内标题使用面板级字号，不做英雄化处理。 */
+.runtime-detail-head h3 {
+  margin: 0;
+  color: var(--page-title);
+  font-size: 17px;
+}
+
+/* 状态说明继续使用弱文本色，降低阅读负担。 */
+.runtime-detail-head p {
+  margin: 0;
+  color: var(--page-muted);
+  font-size: 13px;
+}
+
+/* 明细项用响应式网格展示登录、速度、用量和 CLI 版本。 */
+.runtime-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+/* 明细标签是只读状态，不使用输入框样式以免让用户误以为可编辑。 */
+.runtime-detail-grid span {
+  min-width: 0;
+  padding: 10px 11px;
+  overflow: hidden;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  color: var(--page-title);
+  background: var(--input-bg);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 配置字段标签和控件纵向排列。 */
 .config-grid label {
   display: grid;
@@ -996,6 +1069,10 @@ th {
   }
 
   .config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-detail-grid {
     grid-template-columns: 1fr;
   }
 

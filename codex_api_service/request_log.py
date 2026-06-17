@@ -47,10 +47,11 @@ class RequestLogEntry:
 class RequestLogStore:
     """内存环形请求日志，仅用于本地控制台观察最近请求。"""
 
-    def __init__(self, *, max_entries: int = 200, path: Path | None = None) -> None:
+    def __init__(self, *, max_entries: int = 200, path: Path | None = None, usage_path: Path | None = None) -> None:
         """初始化固定容量日志队列。"""
-        # path 存在时同时做 JSONL 持久化，让服务重启后仍能查看最近请求。
+        # path 存在时同时做 JSONL 持久化；usage_path 用于兼容旧版只写 usage 的历史。
         self.path = path
+        self.usage_path = usage_path
         self._items: deque[RequestLogEntry] = deque(maxlen=max_entries)
         self._load_existing_items()
 
@@ -93,18 +94,28 @@ class RequestLogStore:
 
     def _load_existing_items(self) -> None:
         """从 JSONL 文件加载历史请求元数据。"""
-        # 没有持久化路径或文件缺失时保持纯内存模式。
-        if self.path is None or not self.path.exists():
-            return
         loaded: list[RequestLogEntry] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            entry = _entry_from_dict(item)
-            if entry is not None:
-                loaded.append(entry)
+
+        # 新版请求日志优先加载，里面包含接口、状态和耗时等更完整的元数据。
+        if self.path is not None and self.path.exists():
+            for line in self.path.read_text(encoding="utf-8").splitlines():
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                entry = _entry_from_dict(item)
+                if entry is not None:
+                    loaded.append(entry)
+
+        # 旧版只写 codex-usage 日志；看板统计仍应能回收这些 token 历史。
+        existing_request_ids = {entry.request_id for entry in loaded if entry.request_id}
+        loaded.extend(_entries_from_usage_log(self.usage_path, existing_request_ids=existing_request_ids))
+
+        if not loaded:
+            return
+
+        # 按时间排序后只保留最近 maxlen 条，避免不同来源加载顺序影响展示。
+        loaded.sort(key=lambda entry: entry.timestamp)
         # 文件按旧到新追加，内存按新到旧展示。
         for entry in loaded[-self._items.maxlen :]:
             self._items.appendleft(entry)
@@ -134,6 +145,56 @@ def _entry_from_dict(item: dict[str, Any]) -> RequestLogEntry | None:
             usage=item["usage"] if isinstance(item.get("usage"), dict) else None,
             request_id=item["request_id"] if isinstance(item.get("request_id"), str) else None,
             error=item["error"] if isinstance(item.get("error"), str) else None,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _entries_from_usage_log(usage_path: Path | None, *, existing_request_ids: set[str]) -> list[RequestLogEntry]:
+    """把旧版 codex-usage JSONL 转换成看板可用的请求元数据。"""
+    # 没有 usage 文件时不做兼容加载，保持纯请求日志行为。
+    if usage_path is None or not usage_path.exists():
+        return []
+
+    entries: list[RequestLogEntry] = []
+    for index, line in enumerate(usage_path.read_text(encoding="utf-8").splitlines()):
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        entry = _entry_from_usage_event(item, index=index, existing_request_ids=existing_request_ids)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _entry_from_usage_event(
+    item: dict[str, Any],
+    *,
+    index: int,
+    existing_request_ids: set[str],
+) -> RequestLogEntry | None:
+    """把单条 codex-usage 事件恢复成只读历史记录。"""
+    # usage 历史没有原始接口和耗时，使用明确的 synthetic path 避免误导为实时请求。
+    try:
+        usage = extract_usage(item.get("usage"))
+        if usage is None:
+            return None
+        request_id = item.get("request_id") if isinstance(item.get("request_id"), str) else None
+        if request_id is not None and request_id in existing_request_ids:
+            return None
+        entry_id = f"req_usage_{request_id}" if request_id else f"req_usage_{index}"
+        return RequestLogEntry(
+            id=entry_id,
+            timestamp=str(item["timestamp"]),
+            method="POST",
+            path="/usage/history",
+            model=item["model"] if isinstance(item.get("model"), str) else None,
+            status_code=200,
+            duration_ms=0,
+            usage=usage,
+            request_id=request_id,
+            error=None,
         )
     except (KeyError, TypeError, ValueError):
         return None

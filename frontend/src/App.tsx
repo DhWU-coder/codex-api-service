@@ -108,6 +108,49 @@ function currentDisplayHost(): string {
   return window.location.host || "127.0.0.1:1219";
 }
 
+// 把 health/config 的技术字段翻译成控制台里可读的中文运行状态。
+function runtimeStatusView(health: AdminHealth | null, fastMode: boolean, healthError: string) {
+  if (healthError) {
+    const missingEndpoint = /404|not found/i.test(healthError);
+    return {
+      tone: "attention",
+      summary: missingEndpoint ? "需要更新" : "需要检查",
+      hint: missingEndpoint ? "运行状态接口不可用，请重启服务" : "运行状态读取失败，请检查访问密钥",
+      details: ["登录：未读取", `速度：${fastMode ? "快速" : "标准"}`, "用量：未读取", "CLI：未读取"]
+    };
+  }
+
+  if (!health) {
+    return {
+      tone: "pending",
+      summary: "读取中",
+      hint: "正在读取运行状态",
+      details: ["登录：读取中", `速度：${fastMode ? "快速" : "标准"}`, "用量：读取中", "CLI：读取中"]
+    };
+  }
+
+  const needsAttention = !health.oauth.available || (health.usage.enabled && !health.usage.writable);
+  let usageText = "正常";
+  if (!health.usage.enabled) {
+    usageText = "已关闭";
+  } else if (!health.usage.writable) {
+    usageText = "不可写";
+  }
+  const cliVersion = health.codex.client_version || "未检测到";
+
+  return {
+    tone: needsAttention ? "attention" : "ok",
+    summary: needsAttention ? "需要检查" : "正常",
+    hint: needsAttention ? "打开配置页查看详情" : "OAuth 和日志状态正常",
+    details: [
+      `登录：${health.oauth.available ? "已检测到" : "未检测到"}`,
+      `速度：${fastMode ? "快速" : "标准"}`,
+      `用量：${usageText}`,
+      `CLI：${cliVersion}`
+    ]
+  };
+}
+
 // 消息内容拆成普通文本和 fenced code block 两类，避免使用危险 HTML。
 type MessagePart =
   | { type: "text"; text: string }
@@ -180,6 +223,7 @@ export function App() {
   const [error, setError] = useState("");
   const [logs, setLogs] = useState<RequestLogItem[]>([]);
   const [health, setHealth] = useState<AdminHealth | null>(null);
+  const [healthError, setHealthError] = useState("");
   const [config, setConfig] = useState<AdminConfig | null>(null);
   const [configForm, setConfigForm] = useState<ConfigFormState | null>(null);
   const [configSavedNote, setConfigSavedNote] = useState("");
@@ -236,10 +280,12 @@ export function App() {
   // 读取运行健康状态，驱动侧栏状态条。
   const loadHealth = useCallback(async () => {
     try {
+      setHealthError("");
       const loaded = await fetchAdminHealth(apiKey);
       setHealth(loaded);
-    } catch {
+    } catch (caught) {
       setHealth(null);
+      setHealthError(caught instanceof Error ? caught.message : "状态读取失败");
     }
   }, [apiKey]);
 
@@ -457,9 +503,11 @@ export function App() {
     });
   }, [logSearch, logStatusFilter, logs]);
 
-  // 状态条用短标签展示运行健康度，避免占用主工作区。
-  const oauthStatus = health?.oauth.available ? "OAuth ready" : "OAuth missing";
-  const usageStatus = health?.usage.enabled ? (health.usage.writable ? "Usage ready" : "Usage blocked") : "Usage off";
+  // 中文运行状态同时驱动左侧汇总和配置页明细，避免两处文案漂移。
+  const runtimeStatus = useMemo(
+    () => runtimeStatusView(health, fastMode, healthError),
+    [fastMode, health, healthError]
+  );
 
   return (
     <div className="app-shell">
@@ -480,11 +528,10 @@ export function App() {
           </button>
         </div>
 
-        <div className="runtime-strip" aria-label="运行状态">
-          <span>{oauthStatus}</span>
-          <span>{fastMode ? "Fast on" : "Fast off"}</span>
-          <span>{usageStatus}</span>
-          <span>{health?.codex.client_version || "Codex unknown"}</span>
+        <div className={`runtime-summary ${runtimeStatus.tone}`} aria-label="服务状态">
+          <span className="runtime-summary-label">服务状态</span>
+          <strong>{runtimeStatus.summary}</strong>
+          <small>{runtimeStatus.hint}</small>
         </div>
 
         <nav className="nav-tabs" aria-label="主导航">
@@ -870,6 +917,18 @@ export function App() {
                 刷新
               </button>
             </header>
+
+            <div className="runtime-detail-panel" aria-label="运行状态详情">
+              <div className="runtime-detail-head">
+                <h3>运行状态</h3>
+                <p>{runtimeStatus.hint}</p>
+              </div>
+              <div className="runtime-detail-grid">
+                {runtimeStatus.details.map((detail) => (
+                  <span key={detail}>{detail}</span>
+                ))}
+              </div>
+            </div>
 
             {configForm ? (
               <div className="config-grid">

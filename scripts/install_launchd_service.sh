@@ -61,13 +61,12 @@ PLIST
 # 给启动脚本添加执行权限，launchd 才能直接运行它。
 chmod +x "${PROJECT_ROOT}/scripts/run_service.sh"
 
-# 加载并立即启动服务。
+# 加载服务；RunAtLoad=true 会立即启动，避免 bootstrap 后再 kickstart 造成重复进程。
 launchctl bootstrap "gui/$(id -u)" "${PLIST_PATH}"
-launchctl kickstart -k "gui/$(id -u)/${LABEL}"
 
 # 输出后续管理命令，方便用户复制。
 echo "Installed and started ${LABEL}"
 echo "Console: http://127.0.0.1:1219/ui"
 echo "API base: http://127.0.0.1:1219/v1"
-echo "Health check: curl http://127.0.0.1:1219/health"
+echo "Health check: curl http://127.0.0.1:1219/admin/health"
 echo "Logs: ${LOG_DIR}/launchd.out.log and ${LOG_DIR}/launchd.err.log"
