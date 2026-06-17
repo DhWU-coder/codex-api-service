@@ -71,6 +71,11 @@ codex:
 usage:
   enabled: true
   path: .codex-usage/usage.jsonl
+  source: codex-api-service
+  channel: Codex API Service
+  provider: openai-codex
+  auth: codex-oauth
+  api_surface: chatgpt-codex-responses
 
 auth:
   auth_path:

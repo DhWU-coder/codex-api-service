@@ -23,6 +23,11 @@ def test_load_config_uses_default_values_when_yaml_is_missing(tmp_path: Path) ->
     # 默认日志必须落到项目根目录下，便于 codex-usage 导入整个项目。
     assert config.usage.enabled is True
     assert config.usage.path == tmp_path / ".codex-usage" / "usage.jsonl"
+    assert config.usage.source == "codex-api-service"
+    assert config.usage.channel == "Codex API Service"
+    assert config.usage.provider == "openai-codex"
+    assert config.usage.auth == "codex-oauth"
+    assert config.usage.api_surface == "chatgpt-codex-responses"
 
 
 def test_load_config_merges_yaml_overrides(tmp_path: Path) -> None:
@@ -43,6 +48,11 @@ def test_load_config_merges_yaml_overrides(tmp_path: Path) -> None:
                 "  fast_mode: false",
                 "usage:",
                 "  path: logs/codex-usage.jsonl",
+                "  source: custom-service",
+                "  channel: Custom Service",
+                "  provider: openai",
+                "  auth: api-key",
+                "  api_surface: openai-chat-completions",
             ]
         ),
         encoding="utf-8",
@@ -61,6 +71,11 @@ def test_load_config_merges_yaml_overrides(tmp_path: Path) -> None:
 
     # 相对日志路径应解析到项目根目录下。
     assert config.usage.path == tmp_path / "logs" / "codex-usage.jsonl"
+    assert config.usage.source == "custom-service"
+    assert config.usage.channel == "Custom Service"
+    assert config.usage.provider == "openai"
+    assert config.usage.auth == "api-key"
+    assert config.usage.api_surface == "openai-chat-completions"
 
 
 def test_load_config_supports_environment_api_key_override(tmp_path: Path, monkeypatch) -> None:

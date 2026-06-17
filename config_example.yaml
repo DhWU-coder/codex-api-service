@@ -40,7 +40,13 @@ usage:
   enabled: true
   # 相对路径会解析到项目根目录下，供 codex-usage 导入整个项目目录。
   path: .codex-usage/usage.jsonl
-  # codex-usage 识别用来源字段。
-  source: codex-oauth
-  # codex-usage 前端展示名称。
-  channel: Codex OAuth
+  # codex-usage 识别用来源字段，表示产生日志的项目或组件。
+  source: codex-api-service
+  # codex-usage 前端展示名称，通常对应 source 的人类可读名称。
+  channel: Codex API Service
+  # 实际调用的上游 provider。
+  provider: openai-codex
+  # 当前服务使用的认证方式。
+  auth: codex-oauth
+  # 当前服务访问的上游接口形态。
+  api_surface: chatgpt-codex-responses

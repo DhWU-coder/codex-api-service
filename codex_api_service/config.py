@@ -15,6 +15,13 @@ DEFAULT_CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 # 默认系统指令保持和参考 provider 一致，避免服务行为突然漂移。
 DEFAULT_INSTRUCTIONS = "You are Codex, a coding agent based on GPT-5."
 
+# codex-usage 来源字段描述产生日志的项目，而不是认证方式。
+DEFAULT_USAGE_SOURCE = "codex-api-service"
+DEFAULT_USAGE_CHANNEL = "Codex API Service"
+DEFAULT_USAGE_PROVIDER = "openai-codex"
+DEFAULT_USAGE_AUTH = "codex-oauth"
+DEFAULT_USAGE_API_SURFACE = "chatgpt-codex-responses"
+
 
 @dataclass(frozen=True)
 class ServerConfig:
@@ -51,8 +58,11 @@ class UsageConfig:
 
     path: Path
     enabled: bool = True
-    source: str = "codex-oauth"
-    channel: str = "Codex OAuth"
+    source: str = DEFAULT_USAGE_SOURCE
+    channel: str = DEFAULT_USAGE_CHANNEL
+    provider: str = DEFAULT_USAGE_PROVIDER
+    auth: str = DEFAULT_USAGE_AUTH
+    api_surface: str = DEFAULT_USAGE_API_SURFACE
 
 
 @dataclass(frozen=True)
@@ -131,8 +141,11 @@ def load_config(
     usage = UsageConfig(
         path=usage_path,
         enabled=bool(_nested_get(raw_config, ["usage", "enabled"], True)),
-        source=str(_nested_get(raw_config, ["usage", "source"], "codex-oauth")),
-        channel=str(_nested_get(raw_config, ["usage", "channel"], "Codex OAuth")),
+        source=str(_nested_get(raw_config, ["usage", "source"], DEFAULT_USAGE_SOURCE)),
+        channel=str(_nested_get(raw_config, ["usage", "channel"], DEFAULT_USAGE_CHANNEL)),
+        provider=str(_nested_get(raw_config, ["usage", "provider"], DEFAULT_USAGE_PROVIDER)),
+        auth=str(_nested_get(raw_config, ["usage", "auth"], DEFAULT_USAGE_AUTH)),
+        api_surface=str(_nested_get(raw_config, ["usage", "api_surface"], DEFAULT_USAGE_API_SURFACE)),
     )
 
     # 认证路径可选；未配置时由 auth 模块按 Codex 默认规则解析。
