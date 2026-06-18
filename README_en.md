@@ -100,10 +100,14 @@ python -m codex_api_service.app
 When you see `Uvicorn running on http://127.0.0.1:1219`, the service is running.
 This mode keeps the current terminal occupied; closing the terminal stops the service.
 
-The startup output also prints the console URL:
+The startup output also prints copyable URLs. If `server.host` is `0.0.0.0`, it also prints LAN URLs:
 
 ```text
-Console: http://127.0.0.1:1219/ui
+Codex API Service starting
+  Server:      http://127.0.0.1:1219
+  Local API:   http://127.0.0.1:1219/v1
+  Local UI:    http://127.0.0.1:1219/ui
+  Health:      http://127.0.0.1:1219/health
 ```
 
 Check the service from another terminal:

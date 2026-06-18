@@ -92,10 +92,14 @@ python -m codex_api_service.app
 ```
 
 看到 `Uvicorn running on http://127.0.0.1:1219` 就表示启动了。这个方式会占住当前终端，关闭终端服务就停。
-启动时也会打印控制台地址：
+启动时也会打印可复制地址；如果 `server.host` 是 `0.0.0.0`，还会额外打印局域网地址：
 
 ```text
-Console: http://127.0.0.1:1219/ui
+Codex API Service starting
+  Server:      http://127.0.0.1:1219
+  Local API:   http://127.0.0.1:1219/v1
+  Local UI:    http://127.0.0.1:1219/ui
+  Health:      http://127.0.0.1:1219/health
 ```
 
 另开一个终端检查：

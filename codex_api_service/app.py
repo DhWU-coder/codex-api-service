@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -566,30 +567,62 @@ def _print_config(config: AppConfig) -> None:
     print(json.dumps(safe_config, ensure_ascii=False, indent=2))
 
 
-def _startup_urls(config: AppConfig) -> dict[str, str]:
+def _startup_urls(config: AppConfig, *, lan_host: str | None = None) -> dict[str, str]:
     """生成启动时展示给用户的本地访问地址。"""
     # 0.0.0.0 是监听地址，不适合用户直接复制访问；展示时转换成本机地址。
     display_host = "127.0.0.1" if config.server.host == "0.0.0.0" else config.server.host
     server_url = f"http://{config.server.host}:{config.server.port}"
     display_base = f"http://{display_host}:{config.server.port}"
-    return {
+    urls = {
         "server": server_url,
         "api": f"{display_base}/v1",
         "console": f"{display_base}/ui",
         "health": f"{display_base}/health",
     }
+    if config.server.host == "0.0.0.0":
+        # 只有通配监听才需要提示局域网入口，避免本机模式输出多余地址。
+        if lan_host:
+            lan_base = f"http://{lan_host}:{config.server.port}"
+            urls["lan_api"] = f"{lan_base}/v1"
+            urls["lan_console"] = f"{lan_base}/ui"
+        else:
+            urls["lan_note"] = "not detected, use your machine LAN IP"
+    return urls
+
+
+def _detect_lan_host() -> str | None:
+    """检测当前机器最可能被局域网访问的 IPv4 地址。"""
+    try:
+        # UDP connect 不会真正发送数据，只利用系统路由表选择出口网卡地址。
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            host = sock.getsockname()[0]
+    except OSError:
+        return None
+
+    # 回环地址不能被局域网其他机器访问，所以检测到时当作失败处理。
+    if not host or host.startswith("127."):
+        return None
+    return host
 
 
 def _print_startup_banner(config: AppConfig) -> None:
     """打印启动入口，帮助用户直接找到控制台地址。"""
-    urls = _startup_urls(config)
+    # 只在通配监听时检测局域网 IP，普通本机监听无需做网络探测。
+    lan_host = _detect_lan_host() if config.server.host == "0.0.0.0" else None
+    urls = _startup_urls(config, lan_host=lan_host)
     # flush=True 保证 launchd 日志和前台终端都能尽快看到入口地址。
     print("", flush=True)
     print("Codex API Service starting", flush=True)
-    print(f"  Server:  {urls['server']}", flush=True)
-    print(f"  API:     {urls['api']}", flush=True)
-    print(f"  Console: {urls['console']}", flush=True)
-    print(f"  Health:  {urls['health']}", flush=True)
+    print(f"  Server:      {urls['server']}", flush=True)
+    print(f"  Local API:   {urls['api']}", flush=True)
+    print(f"  Local UI:    {urls['console']}", flush=True)
+    if "lan_api" in urls:
+        print(f"  LAN API:     {urls['lan_api']}", flush=True)
+        print(f"  LAN Console: {urls['lan_console']}", flush=True)
+    elif "lan_note" in urls:
+        print(f"  LAN address: {urls['lan_note']}", flush=True)
+    print(f"  Health:      {urls['health']}", flush=True)
     print("", flush=True)
 
 
