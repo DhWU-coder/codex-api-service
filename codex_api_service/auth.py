@@ -24,6 +24,7 @@ REDIRECT_URI = "http://localhost:1455/auth/callback"
 SCOPE = "openid profile email offline_access"
 JWT_CLAIM_PATH = "https://api.openai.com/auth"
 LOCAL_CALLBACK_WAIT_SECONDS = 15
+TOKEN_REFRESH_SKEW_MS = 60_000
 
 
 @dataclass(frozen=True)
@@ -99,8 +100,18 @@ class CodexAuth:
             credentials = self._login()
             self.save(credentials)
             return credentials
-        if credentials.expires and credentials.expires <= _now_ms() + 60_000:
-            credentials = self.refresh_func(credentials.refresh)
+        if credentials_expired_or_near(credentials):
+            try:
+                credentials = self.refresh_func(credentials.refresh)
+            except RuntimeError as error:
+                if not _is_refresh_token_invalidated(error):
+                    raise
+                imported = self._load_valid_import_credentials()
+                if imported is not None:
+                    self.save(imported)
+                    return imported
+                self.logout()
+                credentials = self._login()
             self.save(credentials)
         return credentials
 
@@ -114,6 +125,13 @@ class CodexAuth:
             self.save(imported)
             return imported
         return None
+
+    def _load_valid_import_credentials(self) -> CodexCredentials | None:
+        """读取仍可直接使用的导入凭据，用于本服务 refresh token 失效后的恢复。"""
+        imported = _parse_auth_file(self.import_auth_path)
+        if imported is None or credentials_expired_or_near(imported):
+            return None
+        return imported
 
     def save(self, credentials: CodexCredentials) -> None:
         """保存 OAuth 凭据到本服务 auth 文件。"""
@@ -290,6 +308,24 @@ def _credentials_from_token_response(payload: dict) -> CodexCredentials:
         expires=_now_ms() + expires_in * 1000,
         account_id=account_id,
         id_token=id_token if isinstance(id_token, str) and id_token else None,
+    )
+
+
+def credentials_expired_or_near(credentials: CodexCredentials) -> bool:
+    """判断 access token 是否已过期或即将过期。"""
+    return bool(credentials.expires and credentials.expires <= _now_ms() + TOKEN_REFRESH_SKEW_MS)
+
+
+def _is_refresh_token_invalidated(error: RuntimeError) -> bool:
+    """识别 OAuth 服务端明确要求重新登录的 refresh token 失效错误。"""
+    message = str(error)
+    return any(
+        marker in message
+        for marker in (
+            "refresh_token_invalidated",
+            "invalid_grant",
+            "Your session has ended",
+        )
     )
 
 

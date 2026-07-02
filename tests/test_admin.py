@@ -45,6 +45,24 @@ def make_admin_config(tmp_path: Path, api_key: str | None = None) -> AppConfig:
     )
 
 
+def write_admin_auth_file(path: Path, *, expires: int) -> None:
+    """写入管理台 health 测试用 OAuth 文件，不包含真实 token。"""
+    path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "test-access",
+                    "refresh_token": "test-refresh",
+                    "account_id": "acct_test",
+                },
+                "expires": expires,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.mark.asyncio
 async def test_admin_config_returns_safe_snapshot_without_secret(tmp_path: Path) -> None:
     """验证管理配置接口不泄露本地 API key 明文。"""
@@ -143,6 +161,25 @@ async def test_admin_health_reports_runtime_status_without_secrets(tmp_path: Pat
     assert body["usage"]["writable"] is True
     assert body["ui"]["built"] in {True, False}
     assert "local-secret" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_admin_health_reports_expired_oauth_file(tmp_path: Path) -> None:
+    """验证 health 能区分 OAuth 文件存在和 token 已过期。"""
+    # 过期的本服务 auth 文件不能再被视为完全可用。
+    config = make_admin_config(tmp_path, api_key="local-secret")
+    write_admin_auth_file(config.auth.auth_path or (tmp_path / "auth.json"), expires=1)
+    app = create_app(config=config, codex_client=AdminFakeCodexClient())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/admin/health", headers={"Authorization": "Bearer local-secret"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["oauth"]["available"] is True
+    assert body["oauth"]["expired"] is True
+    assert "test-access" not in json.dumps(body)
+    assert "test-refresh" not in json.dumps(body)
 
 
 @pytest.mark.asyncio

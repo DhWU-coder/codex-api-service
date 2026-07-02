@@ -57,6 +57,46 @@ class FailingStreamCodexClient:
         yield {}
 
 
+class ToolStreamCodexClient:
+    """模拟 Codex backend 流式返回工具调用。"""
+
+    def __init__(self) -> None:
+        """记录收到的 payload，方便断言路由转换逻辑。"""
+        self.payloads: list[dict[str, Any]] = []
+
+    async def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """流式测试不会使用这个方法。"""
+        raise AssertionError("create_response should not be called")
+
+    async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        """返回 function_call 事件和最终 completed 响应。"""
+        self.payloads.append(payload)
+        yield {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "get_weather",
+                "arguments": '{"city":"杭州"}',
+            },
+        }
+        yield {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_tool",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "get_weather",
+                        "arguments": '{"city":"杭州"}',
+                    }
+                ],
+                "usage": {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
+            },
+        }
+
+
 class FailingCreateCodexClient:
     """模拟非流式聚合阶段收到不可解析的上游响应。"""
 
@@ -143,6 +183,250 @@ async def test_chat_completions_route_returns_openai_completion_and_logs_usage(t
     log_lines = (tmp_path / ".codex-usage" / "usage.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(log_lines) == 1
     assert json.loads(log_lines[0])["usage"]["total"] == 15
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_route_returns_message_and_logs_usage(tmp_path: Path) -> None:
+    """验证 /anthropic/messages 非流式响应兼容 Anthropic Messages。"""
+    # Anthropic SDK 通常使用 x-api-key，服务应复用本地访问密钥校验。
+    fake_client = FakeCodexClient()
+    app = create_app(config=make_test_config(tmp_path, api_key="local-secret"), codex_client=fake_client)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/anthropic/messages",
+            headers={"x-api-key": "local-secret", "anthropic-version": "2023-06-01"},
+            json={
+                "model": "gpt-5.5",
+                "system": "保持简洁",
+                "max_tokens": 128,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "message"
+    assert body["role"] == "assistant"
+    assert body["content"] == [{"type": "text", "text": "hello"}]
+    assert body["stop_reason"] == "end_turn"
+    assert body["usage"] == {"input_tokens": 10, "output_tokens": 5}
+    assert fake_client.payloads[0]["input"][0]["role"] == "system"
+    assert fake_client.payloads[0]["input"][1]["content"][0]["text"] == "hello"
+    assert "max_tokens" not in fake_client.payloads[0]
+
+    log_lines = (tmp_path / ".codex-usage" / "usage.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(log_lines[0])["usage"]["total"] == 15
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_route_maps_discovery_alias_to_real_model(tmp_path: Path) -> None:
+    """验证 Anthropic 发现别名会映射回真实 Codex 模型。"""
+    # 网关发现别名必须通过 Claude 的 Anthropic 模型过滤，但发给 Codex backend 的模型名仍必须是原始值。
+    fake_client = FakeCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/anthropic/messages",
+            json={
+                "model": "claude-sonnet-5-5",
+                "max_tokens": 128,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert fake_client.payloads[0]["model"] == "gpt-5.5"
+    assert response.json()["model"] == "claude-sonnet-5-5"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_v1_messages_route_matches_gateway_inference_path(tmp_path: Path) -> None:
+    """验证 Claude-3p 网关硬拼的 /v1/messages 推理路径可用。"""
+    # Claude-3p 使用 base URL + /v1/messages，因此 /anthropic base URL 需要这个兼容入口。
+    fake_client = FakeCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/anthropic/v1/messages",
+            json={
+                "model": "claude-sonnet-5-5",
+                "max_tokens": 128,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert fake_client.payloads[0]["model"] == "gpt-5.5"
+    assert response.json()["model"] == "claude-sonnet-5-5"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_route_maps_legacy_and_tier_aliases_to_real_model(tmp_path: Path) -> None:
+    """验证旧发现别名和裸 tier 别名也会映射回真实 Codex 模型。"""
+    # 兼容用户已经保存过的旧模型名，同时支持 Claude 可能直接提交的 sonnet tier。
+    fake_client = FakeCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for model in ("claude-gpt-5-5", "sonnet"):
+            response = await client.post(
+                "/anthropic/messages",
+                json={
+                    "model": model,
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+            assert response.status_code == 200
+
+    assert [payload["model"] for payload in fake_client.payloads] == ["gpt-5.5", "gpt-5.5"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_route_forwards_tools_and_images(tmp_path: Path) -> None:
+    """验证 /anthropic/messages 会转发 Anthropic 工具定义和图片输入。"""
+    # tools 与 image 都应转换成 Codex/Responses 风格字段，不能静默丢弃。
+    fake_client = FakeCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/anthropic/messages",
+            json={
+                "model": "gpt-5.5",
+                "max_tokens": 128,
+                "tools": [
+                    {
+                        "name": "get_weather",
+                        "description": "查询天气",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    }
+                ],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "看图"},
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png", "data": "abc123"},
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    payload = fake_client.payloads[0]
+    assert payload["tools"][0]["type"] == "function"
+    assert payload["tools"][0]["parameters"]["required"] == ["city"]
+    assert payload["input"][0]["content"][1] == {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,abc123",
+    }
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_route_streams_named_events(tmp_path: Path) -> None:
+    """验证 /anthropic/messages 流式响应兼容 Anthropic SSE。"""
+    # fake client 会输出 hel + lo，路由应包装成 Anthropic 命名事件。
+    fake_client = FakeCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/anthropic/messages",
+            json={
+                "model": "gpt-5.5",
+                "stream": True,
+                "max_tokens": 128,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    assert "event: message_start" in text
+    assert "event: content_block_start" in text
+    assert 'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hel"}}' in text
+    assert "event: message_delta" in text
+    assert "event: message_stop" in text
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_route_streams_tool_use_events(tmp_path: Path) -> None:
+    """验证 /anthropic/messages 流式工具调用会输出 Anthropic tool_use 块。"""
+    # 上游 function_call 应转成 content_block_start + input_json_delta + content_block_stop。
+    fake_client = ToolStreamCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/anthropic/messages",
+            json={
+                "model": "gpt-5.5",
+                "stream": True,
+                "max_tokens": 128,
+                "tools": [
+                    {
+                        "name": "get_weather",
+                        "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+                    }
+                ],
+                "messages": [{"role": "user", "content": "查天气"}],
+            },
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    assert 'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"get_weather","input":{}}}' in text
+    assert 'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"city\\":\\"杭州\\"}"}}' in text
+    assert 'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":3}}' in text
+
+
+@pytest.mark.asyncio
+async def test_anthropic_model_discovery_route_returns_model_list(tmp_path: Path) -> None:
+    """验证 /anthropic/v1/models 兼容会硬拼 /v1/models 的网关探测。"""
+    # Claude-3p 会过滤包含 gpt/codex 的模型名，因此发现别名必须像 Anthropic tier 模型。
+    app = create_app(config=make_test_config(tmp_path, api_key="local-secret"), codex_client=FakeCodexClient())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/anthropic/v1/models", headers={"x-api-key": "local-secret"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["has_more"] is False
+    assert body["first_id"] == "claude-sonnet-5-5"
+    assert body["last_id"] == "claude-sonnet-5-5"
+    assert body["data"][0]["id"] == "claude-sonnet-5-5"
+    assert body["data"][0]["type"] == "model"
+    assert body["data"][0]["display_name"] == "gpt-5.5"
+    assert body["data"][0]["anthropic_family_tier"] == "sonnet"
+    assert body["data"][0]["is_family_default"] is True
+    assert body["data"][0]["created_at"].endswith("Z")
+
+
+@pytest.mark.asyncio
+async def test_v2_messages_route_is_removed(tmp_path: Path) -> None:
+    """验证旧 /v2/messages 入口已移除，避免继续误导客户端配置。"""
+    app = create_app(config=make_test_config(tmp_path), codex_client=FakeCodexClient())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v2/messages",
+            json={"model": "gpt-5.5", "max_tokens": 128, "messages": [{"role": "user", "content": "hello"}]},
+        )
+
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio

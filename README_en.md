@@ -14,6 +14,9 @@ Supported endpoints and features:
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `POST /anthropic/messages`
+- `POST /anthropic/v1/messages`
+- `GET /anthropic/v1/models`
 - `GET /ui` local console
 - `GET /admin/health` console runtime status
 - Non-streaming responses and `stream: true` SSE streaming
@@ -304,6 +307,62 @@ response = client.responses.create(
 
 print(response.output_text)
 ```
+
+Anthropic Messages API:
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(
+    base_url="http://127.0.0.1:1219/anthropic",
+    api_key="local-secret",  # Matches config.yaml local_api_key; any string works if unset.
+)
+
+message = client.messages.create(
+    model="gpt-5.5",
+    max_tokens=1024,
+    system="Keep it concise",
+    messages=[{"role": "user", "content": "Hello, introduce yourself"}],
+)
+
+print(message.content[0].text)
+```
+
+Anthropic streaming:
+
+```python
+with client.messages.stream(
+    model="gpt-5.5",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Write a Python quicksort"}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="")
+```
+
+`/anthropic/messages` and `/anthropic/v1/messages` map Anthropic `tools` to
+Responses function tools and map `tool_choice` to Responses tool choice. When
+the model returns a function call, non-streaming responses include an Anthropic
+`tool_use` content block; streaming responses emit `content_block_start`,
+`input_json_delta`, and `content_block_stop`.
+
+Some gateways append `/v1/models` to the provider base URL during connection
+tests. Use `http://127.0.0.1:1219/anthropic` as the base URL so discovery reaches
+`/anthropic/v1/models`; do not set the base URL to `/anthropic/messages`. This
+endpoint returns the Anthropic-native model list shape. To pass Claude-3p's
+Anthropic-family model-name filter, model IDs use a `claude-sonnet-...`
+discovery alias, such as `claude-sonnet-5-5`, and include
+`anthropic_family_tier="sonnet"`. `display_name` keeps the original
+`config.yaml` model name, such as `gpt-5.5`. Requests to `/anthropic/messages`
+map that discovery alias, old `claude-gpt-...` aliases, and the bare `sonnet`
+tier back to the real Codex model name automatically.
+Claude-3p gateway inference appends `/v1/messages` to the base URL, so
+`/anthropic/v1/messages` uses the same mapping.
+
+Image input supports Anthropic `image` content blocks:
+
+- `source.type = "base64"` becomes a `data:<media_type>;base64,...` `input_image`
+- `source.type = "url"` becomes a URL `input_image`
 
 ## Usage Logs
 

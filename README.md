@@ -13,6 +13,9 @@ http://127.0.0.1:1219/v1
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `POST /anthropic/messages`
+- `POST /anthropic/v1/messages`
+- `GET /anthropic/v1/models`
 - `GET /ui` 本地控制台
 - `GET /admin/health` 控制台运行状态
 - 非流式和 `stream: true` 流式 SSE
@@ -297,6 +300,56 @@ response = client.responses.create(
 
 print(response.output_text)
 ```
+
+Anthropic Messages API：
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(
+    base_url="http://127.0.0.1:1219/anthropic",
+    api_key="local-secret",  # 对应 config.yaml 的 local_api_key；未配置时可以填任意字符串。
+)
+
+message = client.messages.create(
+    model="gpt-5.5",
+    max_tokens=1024,
+    system="保持简洁",
+    messages=[{"role": "user", "content": "你好，介绍一下你自己"}],
+)
+
+print(message.content[0].text)
+```
+
+Anthropic 流式：
+
+```python
+with client.messages.stream(
+    model="gpt-5.5",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "写一个 Python 快排"}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="")
+```
+
+`/anthropic/messages` 和 `/anthropic/v1/messages` 会把 Anthropic `tools` 转成 Responses function tools，把 `tool_choice` 转成
+Responses tool choice。模型返回 function call 时，非流式响应会输出 `tool_use` content block；
+流式响应会输出 `content_block_start`、`input_json_delta` 和 `content_block_stop`。
+
+有些网关会在 provider base URL 后硬拼 `/v1/models` 做连接测试；请把 base URL 填成
+`http://127.0.0.1:1219/anthropic`，不要填到 `/anthropic/messages`。它会命中
+`/anthropic/v1/models`。该接口返回 Anthropic-native 模型列表格式；为了通过 Claude-3p
+对模型名的 Anthropic family 过滤，模型 id 会使用 `claude-sonnet-...` 发现别名，例如
+`claude-sonnet-5-5`，并带上 `anthropic_family_tier="sonnet"`。`display_name` 保持
+`config.yaml` 里的原始值，例如 `gpt-5.5`。请求 `/anthropic/messages` 时，这个发现别名、
+旧版 `claude-gpt-...` 别名以及裸 `sonnet` tier 都会自动映射回真实 Codex 模型名。
+Claude-3p 网关推理会把 base URL 拼成 `/anthropic/v1/messages`，该路径也会走同一套映射。
+
+图片输入支持 Anthropic `image` content block：
+
+- `source.type = "base64"` 会转成 `data:<media_type>;base64,...` 的 `input_image`
+- `source.type = "url"` 会转成 URL 形式的 `input_image`
 
 ## 用量日志
 

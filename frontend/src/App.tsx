@@ -129,7 +129,8 @@ function runtimeStatusView(health: AdminHealth | null, fastMode: boolean, health
     };
   }
 
-  const needsAttention = !health.oauth.available || (health.usage.enabled && !health.usage.writable);
+  const oauthExpired = health.oauth.expired === true;
+  const needsAttention = !health.oauth.available || oauthExpired || (health.usage.enabled && !health.usage.writable);
   let usageText = "正常";
   if (!health.usage.enabled) {
     usageText = "已关闭";
@@ -137,13 +138,19 @@ function runtimeStatusView(health: AdminHealth | null, fastMode: boolean, health
     usageText = "不可写";
   }
   const cliVersion = health.codex.client_version || "未检测到";
+  let loginText = "已检测到";
+  if (!health.oauth.available) {
+    loginText = "未检测到";
+  } else if (oauthExpired) {
+    loginText = "已过期";
+  }
 
   return {
     tone: needsAttention ? "attention" : "ok",
     summary: needsAttention ? "需要检查" : "正常",
     hint: needsAttention ? "打开配置页查看详情" : "OAuth 和日志状态正常",
     details: [
-      `登录：${health.oauth.available ? "已检测到" : "未检测到"}`,
+      `登录：${loginText}`,
       `速度：${fastMode ? "快速" : "标准"}`,
       `用量：${usageText}`,
       `CLI：${cliVersion}`

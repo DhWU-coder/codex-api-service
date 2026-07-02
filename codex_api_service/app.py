@@ -17,7 +17,24 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 
 from .admin import patch_config_file, safe_config_snapshot
-from .auth import CodexAuth
+from .anthropic_compat import (
+    anthropic_content_block_start_sse,
+    anthropic_content_block_stop_sse,
+    anthropic_error_sse,
+    anthropic_message_delta_sse,
+    anthropic_message_id_from_response,
+    anthropic_message_start_sse,
+    anthropic_message_stop_sse,
+    anthropic_messages_to_codex_input,
+    anthropic_tool_choice_to_codex_tool_choice,
+    anthropic_tool_use_delta_sse,
+    anthropic_tool_use_start_sse,
+    anthropic_tools_to_codex_tools,
+    anthropic_text_delta_sse,
+    build_anthropic_message,
+    codex_event_function_call,
+)
+from .auth import CodexAuth, credentials_expired_or_near
 from .codex_client import CodexClient, CodexHTTPStatusError, _codex_client_version
 from .config import AppConfig, load_config
 from .openai_compat import (
@@ -72,17 +89,25 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
         """返回 OpenAI-compatible 模型列表。"""
         _require_local_auth(request, app_config)
         started = time.perf_counter()
-        created = int(time.time())
-        response_body = {
-            "object": "list",
-            "data": [
-                {"id": model, "object": "model", "created": created, "owned_by": "codex-oauth"}
-                for model in app_config.codex.available_models
-            ],
-        }
+        response_body = _model_list_response(app_config)
         request_log.record(
             method="GET",
             path="/v1/models",
+            model=None,
+            status_code=200,
+            duration_ms=_duration_ms(started),
+        )
+        return response_body
+
+    @app.get("/anthropic/v1/models")
+    async def anthropic_model_discovery(request: Request) -> dict[str, Any]:
+        """返回 Anthropic 网关模型发现所需的模型列表。"""
+        _require_local_auth(request, app_config)
+        started = time.perf_counter()
+        response_body = _anthropic_model_list_response(app_config)
+        request_log.record(
+            method="GET",
+            path="/anthropic/v1/models",
             model=None,
             status_code=200,
             duration_ms=_duration_ms(started),
@@ -165,6 +190,47 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
         )
         return JSONResponse(build_response_object(codex_response, model=model))
 
+    @app.post("/anthropic/messages")
+    @app.post("/anthropic/v1/messages")
+    async def anthropic_messages(request: Request) -> Any:
+        """处理 Anthropic Messages-compatible 请求。"""
+        _require_local_auth(request, app_config)
+        started = time.perf_counter()
+        path = request.url.path
+        body = await request.json()
+        requested_model = str(body.get("model") or _anthropic_model_alias(app_config.codex.default_model))
+        codex_model = _codex_model_from_anthropic_alias(requested_model, app_config)
+        payload = _anthropic_body_to_codex_payload(body, app_config, codex_model)
+        if bool(body.get("stream")):
+            return StreamingResponse(
+                _stream_anthropic_message(client, payload, requested_model, path, usage_logger, request_log, started),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        try:
+            codex_response = await client.create_response(payload)
+        except Exception as error:
+            _raise_non_stream_error(
+                error=error,
+                method="POST",
+                path=path,
+                model=requested_model,
+                request_log=request_log,
+                started=started,
+            )
+        usage_logger.log(model=codex_model, usage=codex_response.get("usage"), request_id=_request_id(codex_response))
+        request_log.record(
+            method="POST",
+            path=path,
+            model=requested_model,
+            status_code=200,
+            duration_ms=_duration_ms(started),
+            usage=codex_response.get("usage"),
+            request_id=_request_id(codex_response),
+        )
+        return JSONResponse(build_anthropic_message(codex_response, model=requested_model))
+
     @app.get("/admin/config")
     async def admin_config(request: Request) -> dict[str, Any]:
         """返回控制台安全配置快照。"""
@@ -193,9 +259,10 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
         _require_local_auth(request, app_config)
         credentials = auth.load()
         urls = _startup_urls(app_config)
+        oauth_expired = credentials_expired_or_near(credentials) if credentials is not None else False
         return {
             "server": urls,
-            "oauth": {"available": credentials is not None},
+            "oauth": {"available": credentials is not None, "expired": oauth_expired},
             "usage": {
                 "enabled": app_config.usage.enabled,
                 "path": str(app_config.usage.path),
@@ -243,8 +310,11 @@ def _require_local_auth(request: Request, config: AppConfig) -> None:
     if not api_key:
         return
     expected = f"Bearer {api_key}"
-    if request.headers.get("authorization") != expected:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    if request.headers.get("authorization") == expected:
+        return
+    if request.headers.get("x-api-key") == api_key:
+        return
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def _chat_body_to_codex_payload(body: dict[str, Any], config: AppConfig, model: str) -> dict[str, Any]:
@@ -266,6 +336,23 @@ def _responses_body_to_codex_payload(body: dict[str, Any], config: AppConfig, mo
     payload["input"] = normalize_responses_input(body["input"])
     if isinstance(body.get("instructions"), str):
         payload["instructions"] = body["instructions"]
+    _copy_optional_generation_fields(body, payload)
+    return payload
+
+
+def _anthropic_body_to_codex_payload(body: dict[str, Any], config: AppConfig, model: str) -> dict[str, Any]:
+    """把 Anthropic Messages 请求体转换为 Codex payload。"""
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        raise HTTPException(status_code=400, detail="messages must be a list")
+    payload = _base_codex_payload(config, model)
+    payload["input"] = anthropic_messages_to_codex_input(messages, system=body.get("system"))
+    tools = anthropic_tools_to_codex_tools(body.get("tools"))
+    if tools:
+        payload["tools"] = tools
+    tool_choice = anthropic_tool_choice_to_codex_tool_choice(body.get("tool_choice"))
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
     _copy_optional_generation_fields(body, payload)
     return payload
 
@@ -326,6 +413,86 @@ def _request_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on", "fast"}
     return bool(value)
+
+
+def _model_list_response(config: AppConfig) -> dict[str, Any]:
+    """构造本地模型发现响应。"""
+    created = int(time.time())
+    return {
+        "object": "list",
+        "data": [
+            {"id": model, "object": "model", "created": created, "owned_by": "codex-oauth"}
+            for model in config.codex.available_models
+        ],
+    }
+
+
+def _anthropic_model_list_response(config: AppConfig) -> dict[str, Any]:
+    """构造 Anthropic-native 模型发现响应。"""
+    created_at = "2026-07-02T00:00:00Z"
+    models = []
+    for index, model in enumerate(config.codex.available_models):
+        is_default = model == config.codex.default_model or index == 0 and config.codex.default_model not in config.codex.available_models
+        models.append(
+            {
+                "type": "model",
+                "id": _anthropic_model_alias(model),
+                "display_name": model,
+                "created_at": created_at,
+                "anthropic_family_tier": "sonnet",
+                "is_family_default": is_default,
+            }
+        )
+    first_id = models[0]["id"] if models else None
+    last_id = models[-1]["id"] if models else None
+    return {"data": models, "has_more": False, "first_id": first_id, "last_id": last_id}
+
+
+def _anthropic_model_alias(model: str) -> str:
+    """生成能通过 Claude-3p 过滤规则的模型发现别名。"""
+    if _looks_like_claude_model(model):
+        return model
+    normalized = _slug_model_name(model)
+    if normalized.startswith("gpt-"):
+        normalized = normalized.removeprefix("gpt-")
+    if normalized.startswith("codex-"):
+        normalized = normalized.removeprefix("codex-")
+    return f"claude-sonnet-{normalized or 'model'}"
+
+
+def _legacy_anthropic_model_alias(model: str) -> str:
+    """生成旧版本使用过的 claude-gpt 风格别名，用于兼容已保存配置。"""
+    if model.startswith(("claude", "anthropic")):
+        return model
+    return f"claude-{_slug_model_name(model) or 'model'}"
+
+
+def _slug_model_name(model: str) -> str:
+    """把模型名规范化成短横线分隔的可读片段。"""
+    normalized = "".join(char.lower() if char.isalnum() else "-" for char in model).strip("-")
+    while "--" in normalized:
+        normalized = normalized.replace("--", "-")
+    return normalized
+
+
+def _looks_like_claude_model(model: str) -> bool:
+    """判断模型名是否已经像 Claude 模型，避免重复改写真实 Claude ID。"""
+    lowered = model.lower()
+    blocked_words = {"gpt", "codex", "openai"}
+    parts = set(_slug_model_name(lowered).split("-"))
+    return lowered.startswith(("anthropic", "claude")) and not blocked_words.intersection(parts)
+
+
+def _codex_model_from_anthropic_alias(model: str, config: AppConfig) -> str:
+    """把 Anthropic 模型发现别名映射回真实 Codex 模型名。"""
+    model_map = {real_model: real_model for real_model in config.codex.available_models}
+    model_map.update({_anthropic_model_alias(real_model): real_model for real_model in config.codex.available_models})
+    model_map.update({_legacy_anthropic_model_alias(real_model): real_model for real_model in config.codex.available_models})
+    if config.codex.default_model in config.codex.available_models:
+        model_map.setdefault("sonnet", config.codex.default_model)
+    elif config.codex.available_models:
+        model_map.setdefault("sonnet", config.codex.available_models[0])
+    return model_map.get(model, model)
 
 
 async def _stream_chat_completion(
@@ -433,6 +600,92 @@ async def _stream_response(
             request_id=_request_id(completed_response),
         )
     yield "data: [DONE]\n\n"
+
+
+async def _stream_anthropic_message(
+    client: Any,
+    payload: dict[str, Any],
+    model: str,
+    path: str,
+    usage_logger: UsageLogger,
+    request_log: RequestLogStore,
+    started: float,
+) -> AsyncIterator[str]:
+    """把 Codex SSE 转成 Anthropic Messages SSE。"""
+    message_id = "msg_resp_stream"
+    content_open = False
+    content_index = 0
+    emitted_content = False
+    completed_response: dict[str, Any] | None = None
+    yield anthropic_message_start_sse(message_id=message_id, model=model)
+    try:
+        async for event in client.stream_response(payload):
+            completed = codex_event_completed_response(event)
+            if completed is not None:
+                completed_response = completed
+                message_id = anthropic_message_id_from_response(completed)
+                continue
+            function_call = codex_event_function_call(event)
+            if function_call is not None:
+                if content_open:
+                    yield anthropic_content_block_stop_sse(index=content_index)
+                    content_index += 1
+                    content_open = False
+                yield anthropic_tool_use_start_sse(function_call, index=content_index)
+                yield anthropic_tool_use_delta_sse(function_call, index=content_index)
+                yield anthropic_content_block_stop_sse(index=content_index)
+                content_index += 1
+                emitted_content = True
+                continue
+            delta = codex_event_text_delta(event)
+            if delta is not None:
+                if not content_open:
+                    yield anthropic_content_block_start_sse(index=content_index)
+                    content_open = True
+                    emitted_content = True
+                yield anthropic_text_delta_sse(delta, index=content_index)
+    except Exception as error:
+        message = _friendly_error_message(error)
+        status_code = _error_status_code(error)
+        request_log.record(
+            method="POST",
+            path=path,
+            model=model,
+            status_code=status_code,
+            duration_ms=_duration_ms(started),
+            error=message,
+        )
+        if content_open:
+            yield anthropic_content_block_stop_sse(index=content_index)
+        yield anthropic_error_sse(message=message)
+        return
+    if content_open:
+        yield anthropic_content_block_stop_sse(index=content_index)
+    elif not emitted_content:
+        yield anthropic_content_block_start_sse(index=content_index)
+        yield anthropic_content_block_stop_sse(index=content_index)
+    if completed_response is not None:
+        usage_logger.log(
+            model=model,
+            usage=completed_response.get("usage"),
+            request_id=_request_id(completed_response),
+        )
+        request_log.record(
+            method="POST",
+            path=path,
+            model=model,
+            status_code=200,
+            duration_ms=_duration_ms(started),
+            usage=completed_response.get("usage"),
+            request_id=_request_id(completed_response),
+        )
+        yield anthropic_message_delta_sse(
+            usage=completed_response.get("usage"),
+            stop_reason=build_anthropic_message(completed_response, model=model)["stop_reason"],
+        )
+    else:
+        yield anthropic_message_delta_sse()
+    yield anthropic_message_stop_sse()
 
 
 def _request_id(response: dict[str, Any]) -> str | None:

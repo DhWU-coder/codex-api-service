@@ -26,7 +26,7 @@ const adminHealth = {
     api: "http://127.0.0.1:1219/v1",
     console: "http://127.0.0.1:1219/ui"
   },
-  oauth: { available: true },
+  oauth: { available: true, expired: false },
   usage: { enabled: true, writable: true, path: ".codex-usage/usage.jsonl" },
   ui: { built: true },
   codex: { client_version: "0.136.0" }
@@ -63,10 +63,12 @@ const requestLogItems = [
 describe("App theme mode", () => {
   let capturedRequests: Array<{ url: string; method: string; body: unknown }> = [];
   let healthEndpointAvailable = true;
+  let healthResponse = adminHealth;
 
   beforeEach(() => {
     capturedRequests = [];
     healthEndpointAvailable = true;
+    healthResponse = { ...adminHealth, oauth: { ...adminHealth.oauth } };
 
     // 用内存版 localStorage 规避 jsdom 在当前环境里的存储实现差异。
     const memoryStorage = new Map<string, string>();
@@ -110,7 +112,7 @@ describe("App theme mode", () => {
           if (!healthEndpointAvailable) {
             return new Response(JSON.stringify({ detail: "Not Found" }), { status: 404 });
           }
-          return new Response(JSON.stringify(adminHealth), { status: 200 });
+          return new Response(JSON.stringify(healthResponse), { status: 200 });
         }
         if (url === "/v1/chat/completions") {
           const streamBody =
@@ -172,6 +174,16 @@ describe("App theme mode", () => {
     expect(await screen.findByText("速度：快速")).toBeTruthy();
     expect(await screen.findByText("用量：正常")).toBeTruthy();
     expect(await screen.findByText("CLI：0.136.0")).toBeTruthy();
+  });
+
+  it("shows attention when the OAuth token file is expired", async () => {
+    // token 文件存在但已过期时，状态区不能继续展示为正常。
+    healthResponse = { ...adminHealth, oauth: { available: true, expired: true } };
+    render(<App />);
+
+    expect(await screen.findByText("需要检查")).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "配置" }));
+    expect(await screen.findByText("登录：已过期")).toBeTruthy();
   });
 
   it("shows restart guidance when the runtime health endpoint is unavailable", async () => {

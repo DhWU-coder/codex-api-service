@@ -40,7 +40,7 @@ export type AdminConfig = {
 // 管理台 health 接口返回的运行状态。
 export type AdminHealth = {
   server: { api: string; console: string };
-  oauth: { available: boolean };
+  oauth: { available: boolean; expired?: boolean };
   usage: { enabled: boolean; writable: boolean; path: string };
   ui: { built: boolean };
   codex: { client_version: string; default_model?: string; fast_mode?: boolean };
