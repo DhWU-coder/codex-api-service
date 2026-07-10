@@ -86,14 +86,41 @@ class RequestLogStore:
         self._append_persisted_entry(entry)
         return entry
 
-    def list_recent(self, *, limit: int = 100) -> list[dict[str, Any]]:
+    def list_recent(self, *, limit: int | str = 100) -> list[dict[str, Any]]:
         """按时间倒序返回最近请求。"""
+        # limit=all 用于本地看板全量统计，数据来自持久化 JSONL。
+        if isinstance(limit, str) and limit.lower() == "all":
+            return [item.to_dict() for item in self._all_entries()]
+
         # limit 防止管理接口一次返回过多数据。
-        safe_limit = max(1, min(int(limit), 500))
+        try:
+            safe_limit = max(1, min(int(limit), 500))
+        except (TypeError, ValueError):
+            safe_limit = 100
         return [item.to_dict() for item in list(self._items)[:safe_limit]]
 
     def _load_existing_items(self) -> None:
         """从 JSONL 文件加载历史请求元数据。"""
+        loaded = self._read_persisted_entries()
+
+        if not loaded:
+            return
+
+        # 按时间排序后只保留最近 maxlen 条，避免不同来源加载顺序影响展示。
+        loaded.sort(key=lambda entry: entry.timestamp)
+        # 文件按旧到新追加，内存按新到旧展示。
+        for entry in loaded[-self._items.maxlen :]:
+            self._items.appendleft(entry)
+
+    def _all_entries(self) -> list[RequestLogEntry]:
+        """读取全部持久化请求日志，并按时间倒序返回。"""
+        loaded = self._read_persisted_entries()
+        if not loaded:
+            return list(self._items)
+        return sorted(loaded, key=lambda entry: entry.timestamp, reverse=True)
+
+    def _read_persisted_entries(self) -> list[RequestLogEntry]:
+        """从新版请求日志和旧版 usage 日志读取全部可用历史。"""
         loaded: list[RequestLogEntry] = []
 
         # 新版请求日志优先加载，里面包含接口、状态和耗时等更完整的元数据。
@@ -110,15 +137,7 @@ class RequestLogStore:
         # 旧版只写 codex-usage 日志；看板统计仍应能回收这些 token 历史。
         existing_request_ids = {entry.request_id for entry in loaded if entry.request_id}
         loaded.extend(_entries_from_usage_log(self.usage_path, existing_request_ids=existing_request_ids))
-
-        if not loaded:
-            return
-
-        # 按时间排序后只保留最近 maxlen 条，避免不同来源加载顺序影响展示。
-        loaded.sort(key=lambda entry: entry.timestamp)
-        # 文件按旧到新追加，内存按新到旧展示。
-        for entry in loaded[-self._items.maxlen :]:
-            self._items.appendleft(entry)
+        return loaded
 
     def _append_persisted_entry(self, entry: RequestLogEntry) -> None:
         """把单条请求元数据追加写入 JSONL。"""

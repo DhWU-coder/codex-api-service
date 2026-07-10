@@ -231,6 +231,48 @@ async def test_admin_requests_survive_app_restart(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_admin_requests_can_list_all_persisted_entries(tmp_path: Path) -> None:
+    """验证请求日志接口支持读取超过内存窗口的全部持久化记录。"""
+    # 直接写入超过 200 条历史，模拟本地服务长期运行后的请求日志文件。
+    requests_path = tmp_path / "logs" / "requests.jsonl"
+    requests_path.parent.mkdir(parents=True)
+    lines = []
+    for index in range(250):
+        lines.append(
+            json.dumps(
+                {
+                    "id": f"req_{index:03d}",
+                    "timestamp": f"2026-07-10T10:{index // 60:02d}:{index % 60:02d}.000Z",
+                    "method": "POST",
+                    "path": "/v1/chat/completions",
+                    "model": "gpt-5.5",
+                    "status_code": 200,
+                    "duration_ms": 100 + index,
+                    "usage": {"total": index, "input": index, "cached": 0, "output": 0, "reasoning": 0},
+                    "request_id": f"resp_{index:03d}",
+                    "error": None,
+                },
+                ensure_ascii=False,
+            )
+        )
+    requests_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    app = create_app(config=make_admin_config(tmp_path), codex_client=AdminFakeCodexClient())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        limited = await client.get("/admin/requests")
+        all_entries = await client.get("/admin/requests?limit=all")
+
+    # 默认接口仍保持最近窗口；limit=all 返回完整持久化历史，且按新到旧排序。
+    assert limited.status_code == 200
+    assert all_entries.status_code == 200
+    assert len(limited.json()["items"]) == 100
+    body = all_entries.json()
+    assert len(body["items"]) == 250
+    assert body["items"][0]["id"] == "req_249"
+    assert body["items"][-1]["id"] == "req_000"
+
+
+@pytest.mark.asyncio
 async def test_admin_requests_imports_existing_usage_history(tmp_path: Path) -> None:
     """验证旧版 usage 历史在没有请求日志文件时也能进入看板统计。"""
     # 旧版本只写 codex-usage 日志，没有 logs/requests.jsonl，请求看板应能读回这类历史。

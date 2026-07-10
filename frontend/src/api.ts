@@ -101,9 +101,9 @@ export async function reloadCodexAuth(apiKey: string): Promise<AuthReloadResult>
   return (await response.json()) as AuthReloadResult;
 }
 
-// 读取最近 API 请求日志；limit 用于看板拉取更多统计样本。
-export async function fetchRequestLogs(apiKey: string, limit = 100): Promise<RequestLogItem[]> {
-  const response = await fetch(`/admin/requests?limit=${limit}`, {
+// 读取 API 请求日志；limit=all 时用于本地看板全量统计。
+export async function fetchRequestLogs(apiKey: string, limit: number | "all" = 100): Promise<RequestLogItem[]> {
+  const response = await fetch(`/admin/requests?limit=${encodeURIComponent(String(limit))}`, {
     headers: buildAuthHeaders(apiKey)
   });
   if (!response.ok) {

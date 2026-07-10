@@ -17,7 +17,7 @@ import {
   Square,
   Zap
 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   buildAuthHeaders,
@@ -28,7 +28,15 @@ import {
   reloadCodexAuth,
   saveAdminConfig
 } from "./api";
-import { formatCompactNumber, formatDuration, summarizeRequestLogs } from "./dashboard";
+import {
+  formatCompactNumber,
+  formatDuration,
+  formatNumber,
+  summarizeRequestLogs,
+  type DashboardDistributionItem,
+  type DashboardRangePreset,
+  type DashboardTimelineBucket
+} from "./dashboard";
 import type { AdminConfig, AdminHealth, ChatMessage, ChatUsage, RequestLogItem } from "./types";
 
 // 顶部导航标签的枚举，保持状态值简短稳定。
@@ -40,16 +48,17 @@ type ThemeMode = "light" | "dark";
 // 主题选择保存在本地浏览器，刷新后保持用户偏好。
 const THEME_STORAGE_KEY = "codex-console-theme";
 
-// 看板默认读取最近 200 条请求，在本地工具里兼顾速度和统计可信度。
-const DASHBOARD_LOG_LIMIT = 200;
+// 本地控制台默认读取全部持久化请求日志，让看板和日志页统计口径一致。
+const REQUEST_LOG_LIMIT = "all";
 
-// Token 拆分展示顺序固定，方便用户形成稳定阅读习惯。
-const TOKEN_BREAKDOWN_ITEMS = [
-  { key: "input", label: "输入" },
-  { key: "output", label: "输出" },
-  { key: "reasoning", label: "推理" },
-  { key: "cached", label: "缓存" }
-] as const;
+// API Service 用量看板支持的时间范围，顺序和页面分段控件一致。
+const DASHBOARD_RANGE_OPTIONS: Array<{ value: DashboardRangePreset; label: string }> = [
+  { value: "today", label: "今日" },
+  { value: "week", label: "本周" },
+  { value: "month", label: "本月" },
+  { value: "all", label: "全部" },
+  { value: "recent", label: "最近" }
+];
 
 // 配置表单只暴露第一版控制台支持安全编辑的字段。
 type ConfigFormState = {
@@ -215,6 +224,162 @@ function MessageContent({ content }: { content: string }) {
   );
 }
 
+// 用量中心的 KPI 卡保持紧凑，图标只辅助识别，不抢数字层级。
+function UsageMetricCard({
+  label,
+  value,
+  hint,
+  icon
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  icon?: ReactNode;
+}) {
+  return (
+    <article className="usage-metric">
+      <div>
+        <span>{label}</span>
+        <strong title={value}>{value}</strong>
+        {hint ? <small>{hint}</small> : null}
+      </div>
+      {icon ? <span className="usage-metric-icon">{icon}</span> : null}
+    </article>
+  );
+}
+
+// 时间分布图只展示成功请求的输入/输出 token，避免暴露请求正文。
+function TimelinePanel({ buckets }: { buckets: DashboardTimelineBucket[] }) {
+  const maxTokens = Math.max(...buckets.map((bucket) => bucket.totalTokens), 1);
+  return (
+    <section className="usage-panel timeline-panel" aria-label="时间分布">
+      <div className="usage-panel-heading">
+        <h3>时间分布</h3>
+        <span>{buckets.length ? `${buckets.length} 个时间桶` : "暂无数据"}</span>
+      </div>
+      <div className="timeline-chart" aria-label="按时间聚合的 token 使用量">
+        {buckets.length ? (
+          <>
+            <div className="timeline-plot" role="list">
+              {buckets.map((bucket) => {
+                const height = bucket.totalTokens
+                  ? Math.max((bucket.totalTokens / maxTokens) * 100, 8)
+                  : bucket.requestCount
+                    ? 4
+                    : 0;
+                const inputPercent = bucket.totalTokens
+                  ? Math.round((bucket.inputTokens / bucket.totalTokens) * 100)
+                  : 0;
+                const outputPercent = bucket.totalTokens ? Math.max(0, 100 - inputPercent) : 0;
+                const tooltip = `${bucket.label} · ${formatNumber(bucket.totalTokens)} tokens · 输入 ${formatNumber(bucket.inputTokens)} · 输出 ${formatNumber(bucket.outputTokens)} · ${bucket.requestCount} 次成功请求`;
+                return (
+                  <div className="timeline-bar" key={bucket.key} role="listitem" aria-label={tooltip} tabIndex={0}>
+                    <div className="timeline-stack-anchor" style={{ height: `${height}%` }}>
+                      <div className="timeline-stack">
+                        <span className="timeline-segment output" style={{ height: `${outputPercent}%` }} />
+                        <span className="timeline-segment input" style={{ height: `${inputPercent}%` }} />
+                      </div>
+                      <div className="timeline-tooltip" role="tooltip">
+                        <strong>{bucket.label}</strong>
+                        <span>总 {formatNumber(bucket.totalTokens)} tokens</span>
+                        <span>输入 {formatNumber(bucket.inputTokens)}</span>
+                        <span>输出 {formatNumber(bucket.outputTokens)}</span>
+                        <span>{bucket.requestCount} 次成功请求</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="timeline-axis" aria-hidden="true">
+              {buckets.map((bucket) => (
+                <small key={bucket.key}>{bucket.label}</small>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="usage-empty">当前范围暂无请求</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// 分布面板用于模型、状态和接口排行。
+function DistributionPanel({
+  title,
+  items,
+  valueLabel = "tokens"
+}: {
+  title: string;
+  items: DashboardDistributionItem[];
+  valueLabel?: string;
+}) {
+  const maxValue = Math.max(...items.map((item) => Math.max(item.totalTokens, item.requestCount)), 1);
+  return (
+    <section className="usage-panel distribution-panel" aria-label={title}>
+      <div className="usage-panel-heading">
+        <h3>{title}</h3>
+      </div>
+      <div className="distribution-list">
+        {items.length ? (
+          items.slice(0, 6).map((item) => {
+            const displayValue = item.totalTokens ? formatNumber(item.totalTokens) : `${item.requestCount} 次`;
+            const width = (Math.max(item.totalTokens, item.requestCount) / maxValue) * 100;
+            return (
+              <div className="distribution-row" key={item.name}>
+                <div className="distribution-label">
+                  <strong title={item.name}>{item.name}</strong>
+                  <span>{displayValue}</span>
+                </div>
+                <div className="distribution-track" aria-label={`${item.name} ${displayValue} ${valueLabel}`}>
+                  <span style={{ width: `${Math.max(width, item.requestCount ? 3 : 0)}%` }} />
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <div className="usage-empty compact">暂无数据</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// 请求洞察列表复用失败请求和慢请求两类紧凑行。
+function RequestInsightList({
+  title,
+  items,
+  emptyText
+}: {
+  title: string;
+  items: RequestLogItem[];
+  emptyText: string;
+}) {
+  return (
+    <section className="usage-panel request-insights" aria-label={title}>
+      <div className="usage-panel-heading">
+        <h3>{title}</h3>
+      </div>
+      <div className="insight-list">
+        {items.length ? (
+          items.map((item) => (
+            <div className="insight-row" key={item.id}>
+              <div>
+                <strong>{item.path}</strong>
+                <span>{item.model || "-"} · {new Date(item.timestamp).toLocaleTimeString()}</span>
+              </div>
+              <small>{item.status_code >= 400 ? item.status_code : formatDuration(item.duration_ms)}</small>
+            </div>
+          ))
+        ) : (
+          <div className="usage-empty compact">{emptyText}</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 // 本地控制台主组件，包含聊天、日志和配置三个工作区。
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("dashboard");
@@ -237,6 +402,8 @@ export function App() {
   const [configSavedNote, setConfigSavedNote] = useState("");
   const [authReloadNote, setAuthReloadNote] = useState("");
   const [isReloadingAuth, setIsReloadingAuth] = useState(false);
+  const [dashboardPreset, setDashboardPreset] = useState<DashboardRangePreset>("today");
+  const [dashboardRecentDays, setDashboardRecentDays] = useState(7);
   const [logSearch, setLogSearch] = useState("");
   const [logStatusFilter, setLogStatusFilter] = useState("all");
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
@@ -270,7 +437,10 @@ export function App() {
   }, []);
 
   // 当前日志统计摘要，驱动看板和日志页顶部信息。
-  const dashboardSummary = useMemo(() => summarizeRequestLogs(logs), [logs]);
+  const dashboardSummary = useMemo(
+    () => summarizeRequestLogs(logs, { preset: dashboardPreset, recentDays: dashboardRecentDays }),
+    [dashboardPreset, dashboardRecentDays, logs]
+  );
 
   // 读取管理配置，并把可编辑字段放进表单。
   const loadConfig = useCallback(async () => {
@@ -303,7 +473,7 @@ export function App() {
   const loadLogs = useCallback(async () => {
     try {
       setError("");
-      const items = await fetchRequestLogs(apiKey, DASHBOARD_LOG_LIMIT);
+      const items = await fetchRequestLogs(apiKey, REQUEST_LOG_LIMIT);
       setLogs(items);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "请求日志读取失败");
@@ -504,15 +674,6 @@ export function App() {
     }
   }, [apiKey, loadHealth]);
 
-  // Token 拆分按实际组成计算占比；没有 usage 时保持 0 宽度。
-  const tokenBreakdownTotal = TOKEN_BREAKDOWN_ITEMS.reduce(
-    (sum, item) => sum + dashboardSummary.tokenBreakdown[item.key],
-    0
-  );
-
-  // 趋势柱以当前窗口最大 token 为基准，保证小样本也能看出差异。
-  const trendMaxTokens = Math.max(...dashboardSummary.trend.map((item) => item.totalTokens), 1);
-
   // 日志过滤只匹配元数据字段，仍然不读取或展示 prompt。
   const filteredLogs = useMemo(() => {
     const query = logSearch.trim().toLowerCase();
@@ -620,12 +781,13 @@ export function App() {
         ) : null}
 
         {activeTab === "dashboard" ? (
-          <section className="panel dashboard-panel" aria-label="数据看板">
-            <header className="toolbar">
+          <section className="usage-dashboard" aria-label="数据看板">
+            <header className="usage-topbar">
               <div>
-                <h2>数据看板</h2>
+                <h2>Codex API Service Usage</h2>
                 <p>
-                  最近 {dashboardSummary.requestCount} 条请求，常用模型 {dashboardSummary.topModel}
+                  {formatNumber(dashboardSummary.totalTokens)} tokens · {dashboardSummary.requestCount} 条请求 ·{" "}
+                  {dashboardSummary.lastUpdated}
                 </p>
               </div>
               <button className="secondary-button" onClick={() => void loadLogs()}>
@@ -634,118 +796,116 @@ export function App() {
               </button>
             </header>
 
-            <div className="dashboard-content">
-              {/* 顶部指标区优先展示用量、稳定性和响应速度。 */}
-              <div className="metric-grid" aria-label="使用概览">
-                <article className="metric-card">
-                  <span className="metric-icon">
-                    <Database size={18} />
-                  </span>
-                  <div>
-                    <p>累计 tokens</p>
-                    <strong>{formatCompactNumber(dashboardSummary.totalTokens)}</strong>
-                  </div>
-                </article>
-                <article className="metric-card">
-                  <span className="metric-icon">
-                    <Activity size={18} />
-                  </span>
-                  <div>
-                    <p>请求数</p>
-                    <strong>{dashboardSummary.requestCount}</strong>
-                  </div>
-                </article>
-                <article className="metric-card">
-                  <span className="metric-icon">
-                    <CheckCircle2 size={18} />
-                  </span>
-                  <div>
-                    <p>成功率</p>
-                    <strong>{dashboardSummary.successRate}%</strong>
-                  </div>
-                </article>
-                <article className="metric-card">
-                  <span className="metric-icon">
-                    <Clock3 size={18} />
-                  </span>
-                  <div>
-                    <p>平均耗时</p>
-                    <strong>{formatDuration(dashboardSummary.averageDurationMs)}</strong>
-                  </div>
-                </article>
+            <div className="usage-filterbar" aria-label="用量范围">
+              <div className="range-segments">
+                {DASHBOARD_RANGE_OPTIONS.map((option) => (
+                  <button
+                    className={dashboardPreset === option.value ? "active" : ""}
+                    key={option.value}
+                    onClick={() => setDashboardPreset(option.value)}
+                    type="button"
+                  >
+                    {option.label}
+                  </button>
+                ))}
               </div>
+              {dashboardPreset === "recent" ? (
+                <label className="recent-days-field">
+                  <span>天数</span>
+                  <input
+                    min={1}
+                    max={365}
+                    type="number"
+                    value={dashboardRecentDays}
+                    onChange={(event) => setDashboardRecentDays(Math.max(1, Number(event.target.value) || 1))}
+                  />
+                </label>
+              ) : null}
+              <span className="usage-range-note">
+                {dashboardSummary.rangeLabel} · {dashboardSummary.bucketLabel}
+              </span>
+            </div>
 
-              <div className="dashboard-grid">
-                {/* Token 结构用横向条展示，让输入、输出和推理占比一眼可扫。 */}
-                <section className="dashboard-section" aria-label="Token 结构">
-                  <div className="section-heading">
-                    <h3>Token 结构</h3>
-                    <span>{formatCompactNumber(tokenBreakdownTotal)} tokens</span>
-                  </div>
-                  <div className="token-breakdown">
-                    {TOKEN_BREAKDOWN_ITEMS.map((item) => {
-                      const value = dashboardSummary.tokenBreakdown[item.key];
-                      const percent = tokenBreakdownTotal ? Math.round((value / tokenBreakdownTotal) * 100) : 0;
-                      return (
-                        <div className="token-row" key={item.key}>
-                          <div className="token-row-head">
-                            <span>{item.label}</span>
-                            <strong>{formatCompactNumber(value)}</strong>
-                          </div>
-                          <div className="token-track" aria-label={`${item.label} ${percent}%`}>
-                            <span className={`token-fill ${item.key}`} style={{ width: `${percent}%` }} />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </section>
+            <div className="usage-metrics" aria-label="API Service 用量概览">
+              <UsageMetricCard
+                icon={<Database size={18} />}
+                label="总 tokens"
+                value={formatNumber(dashboardSummary.totalTokens)}
+              />
+              <UsageMetricCard
+                label="输入"
+                value={formatNumber(dashboardSummary.tokenBreakdown.input)}
+              />
+              <UsageMetricCard
+                label="缓存输入"
+                value={formatNumber(dashboardSummary.tokenBreakdown.cached)}
+              />
+              <UsageMetricCard
+                label="输出"
+                value={formatNumber(dashboardSummary.tokenBreakdown.output)}
+              />
+              <UsageMetricCard
+                label="推理输出"
+                value={formatNumber(dashboardSummary.tokenBreakdown.reasoning)}
+              />
+              <UsageMetricCard
+                icon={<Activity size={18} />}
+                label="请求数"
+                value={formatNumber(dashboardSummary.requestCount)}
+              />
+              <UsageMetricCard
+                icon={<CheckCircle2 size={18} />}
+                label="成功率"
+                value={`${dashboardSummary.successRate}%`}
+                hint={`${dashboardSummary.errorCount} 条失败`}
+              />
+              <UsageMetricCard
+                icon={<Clock3 size={18} />}
+                label="平均耗时"
+                value={formatDuration(dashboardSummary.averageDurationMs)}
+                hint={`常用模型 ${dashboardSummary.topModel}`}
+              />
+            </div>
 
-                {/* 最近请求趋势只展示 token 高低和失败状态，不暴露请求内容。 */}
-                <section className="dashboard-section" aria-label="最近请求趋势">
-                  <div className="section-heading">
-                    <h3>最近请求</h3>
-                    <span>{dashboardSummary.errorCount} 条失败</span>
-                  </div>
-                  <div className="trend-chart">
-                    {dashboardSummary.trend.length ? (
-                      dashboardSummary.trend.map((item) => {
-                        const height = Math.max((item.totalTokens / trendMaxTokens) * 100, item.totalTokens ? 12 : 4);
-                        return (
-                          <span
-                            className={item.statusCode >= 400 ? "trend-bar failed" : "trend-bar"}
-                            key={item.id}
-                            style={{ height: `${height}%` }}
-                            title={`${new Date(item.timestamp).toLocaleTimeString()} · ${item.totalTokens} tokens`}
-                          />
-                        );
-                      })
-                    ) : (
-                      <div className="trend-empty">暂无请求</div>
-                    )}
-                  </div>
-                </section>
+            <div className="usage-main-grid">
+              <TimelinePanel buckets={dashboardSummary.timeline} />
+              <div className="usage-side-stack">
+                <DistributionPanel title="模型分布" items={dashboardSummary.modelDistribution} />
+                <DistributionPanel title="状态分布" items={dashboardSummary.statusDistribution} valueLabel="请求" />
+                <DistributionPanel title="接口分布" items={dashboardSummary.endpointDistribution} />
               </div>
+            </div>
 
-              {/* 健康摘要把错误数、模型和 usage 写入状态放在同一行，便于快速巡检。 */}
-              <div className="health-strip" aria-label="运行摘要">
-                <span>
-                  <strong>{dashboardSummary.successCount}</strong>
-                  成功
-                </span>
-                <span>
-                  <strong>{dashboardSummary.errorCount}</strong>
-                  失败
-                </span>
-                <span>
-                  <strong>{dashboardSummary.topModel}</strong>
-                  模型
-                </span>
-                <span>
-                  <strong>{config ? (config.usage.enabled ? "开启" : "关闭") : "读取中"}</strong>
-                  usage 日志
-                </span>
-              </div>
+            <div className="usage-bottom-grid">
+              <RequestInsightList
+                emptyText="当前范围没有失败请求"
+                items={dashboardSummary.recentFailures}
+                title="最近失败"
+              />
+              <RequestInsightList
+                emptyText="当前范围没有请求"
+                items={dashboardSummary.slowRequests}
+                title="慢请求 Top"
+              />
+              <section className="usage-panel usage-log-status" aria-label="usage 日志状态">
+                <div className="usage-panel-heading">
+                  <h3>usage 日志</h3>
+                </div>
+                <div className="usage-status-grid">
+                  <span>
+                    <strong>{config ? (config.usage.enabled ? "开启" : "关闭") : "读取中"}</strong>
+                    写入状态
+                  </span>
+                  <span>
+                    <strong>{health?.usage.writable === false ? "不可写" : "正常"}</strong>
+                    文件权限
+                  </span>
+                  <span title={config?.usage.path || ""}>
+                    <strong>{config?.usage.path ? "已配置" : "读取中"}</strong>
+                    日志路径
+                  </span>
+                </div>
+              </section>
             </div>
           </section>
         ) : null}

@@ -291,7 +291,7 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
         return {"oauth": _oauth_status(credentials, reloaded=True)}
 
     @app.get("/admin/requests")
-    async def admin_requests(request: Request, limit: int = 100) -> dict[str, Any]:
+    async def admin_requests(request: Request, limit: str = "100") -> dict[str, Any]:
         """返回最近 API 请求元数据。"""
         _require_local_auth(request, app_config)
         return {"items": request_log.list_recent(limit=limit)}

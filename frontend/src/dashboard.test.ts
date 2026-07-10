@@ -72,4 +72,79 @@ describe("dashboard summary", () => {
     expect(summary.topModel).toBe("-");
     expect(summary.trend).toEqual([]);
   });
+
+  it("filters API service usage and builds analysis distributions", () => {
+    // 新用量中心默认聚焦本服务日志，应能按今日范围生成 KPI、时间桶和分布榜单。
+    const logs: RequestLogItem[] = [
+      {
+        id: "req_today_slow",
+        timestamp: "2026-07-10T18:20:00+08:00",
+        method: "POST",
+        path: "/v1/chat/completions",
+        model: "gpt-5.5",
+        status_code: 200,
+        duration_ms: 8200,
+        usage: { total: 120, input: 90, cached: 50, output: 30, reasoning: 12 },
+        request_id: "resp_today_slow",
+        error: null
+      },
+      {
+        id: "req_today_fail",
+        timestamp: "2026-07-10T17:15:00+08:00",
+        method: "POST",
+        path: "/v1/responses",
+        model: "gpt-5-mini",
+        status_code: 502,
+        duration_ms: 2400,
+        usage: null,
+        request_id: null,
+        error: "upstream unavailable"
+      },
+      {
+        id: "req_yesterday",
+        timestamp: "2026-07-09T23:50:00+08:00",
+        method: "POST",
+        path: "/v1/chat/completions",
+        model: "gpt-5.5",
+        status_code: 200,
+        duration_ms: 900,
+        usage: { total: 999, input: 999, cached: 0, output: 0, reasoning: 0 },
+        request_id: "resp_yesterday",
+        error: null
+      }
+    ];
+
+    const summary = summarizeRequestLogs(logs, {
+      preset: "today",
+      now: new Date("2026-07-10T19:30:00+08:00")
+    });
+
+    expect(summary.requestCount).toBe(2);
+    expect(summary.totalTokens).toBe(120);
+    expect(summary.tokenBreakdown).toEqual({ input: 90, cached: 50, output: 30, reasoning: 12 });
+    expect(
+      summary.timeline.map((bucket) => [
+        bucket.label,
+        bucket.totalTokens,
+        bucket.inputTokens,
+        bucket.outputTokens,
+        bucket.requestCount
+      ])
+    ).toEqual([
+      ["18:00", 120, 90, 30, 1]
+    ]);
+    expect(summary.modelDistribution.map((item) => [item.name, item.totalTokens, item.requestCount])).toEqual([
+      ["gpt-5.5", 120, 1],
+      ["gpt-5-mini", 0, 1]
+    ]);
+    expect(summary.statusDistribution).toEqual([
+      { name: "成功", totalTokens: 120, requestCount: 1 },
+      { name: "失败", totalTokens: 0, requestCount: 1 }
+    ]);
+    expect(summary.endpointDistribution.map((item) => item.name)).toEqual(["/v1/chat/completions", "/v1/responses"]);
+    expect(summary.recentFailures[0].id).toBe("req_today_fail");
+    expect(summary.slowRequests[0].id).toBe("req_today_slow");
+    expect(summary.rangeLabel).toBe("今日");
+    expect(summary.bucketLabel).toBe("按小时");
+  });
 });

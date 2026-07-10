@@ -156,17 +156,23 @@ describe("App theme mode", () => {
   });
 
   it("shows dashboard metrics from recent request logs", async () => {
-    // 默认首页应是看板，直接展示请求量和 token 使用概览。
+    // 默认首页应是 API Service 用量中心，切到全部范围后展示历史请求概览。
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "数据看板" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Codex API Service Usage" })).toBeTruthy();
     expect(await screen.findByText(window.location.host)).toBeTruthy();
     expect(await screen.findByText("服务状态")).toBeTruthy();
-    expect(await screen.findByText("正常")).toBeTruthy();
+    expect((await screen.findAllByText("正常")).length).toBeGreaterThan(0);
     expect(screen.queryByText("OAuth ready")).toBeNull();
-    expect(await screen.findByText("累计 tokens")).toBeTruthy();
-    expect(await screen.findByText("60")).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "全部" }));
+    expect(await screen.findByText("总 tokens")).toBeTruthy();
+    expect((await screen.findAllByText("60")).length).toBeGreaterThan(0);
     expect(await screen.findByText("100%")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "时间分布" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "模型分布" })).toBeTruthy();
+    expect(await screen.findByLabelText("06/16 · 60 tokens · 输入 32 · 输出 23 · 2 次成功请求")).toBeTruthy();
+    expect(await screen.findByText("总 60 tokens")).toBeTruthy();
+    expect(capturedRequests.some((request) => request.url === "/admin/requests?limit=all")).toBe(true);
   });
 
   it("moves detailed runtime status to the config page", async () => {
