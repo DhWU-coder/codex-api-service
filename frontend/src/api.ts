@@ -1,4 +1,4 @@
-import type { AdminConfig, AdminHealth, ParsedChatStreamEvent, RequestLogItem } from "./types";
+import type { AdminConfig, AdminHealth, AuthReloadResult, ParsedChatStreamEvent, RequestLogItem } from "./types";
 
 // 构造本地服务 Bearer 鉴权头；空 key 不发送 Authorization。
 export function buildAuthHeaders(apiKey: string): Record<string, string> {
@@ -87,6 +87,18 @@ export async function fetchAdminHealth(apiKey: string): Promise<AdminHealth> {
     throw new Error(`状态读取失败：${await responseErrorMessage(response)}`);
   }
   return (await response.json()) as AdminHealth;
+}
+
+// 从 Codex CLI/App 登录文件重新导入 OAuth 凭据。
+export async function reloadCodexAuth(apiKey: string): Promise<AuthReloadResult> {
+  const response = await fetch("/admin/auth/reload", {
+    method: "POST",
+    headers: buildAuthHeaders(apiKey)
+  });
+  if (!response.ok) {
+    throw new Error(`OAuth 同步失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as AuthReloadResult;
 }
 
 // 读取最近 API 请求日志；limit 用于看板拉取更多统计样本。

@@ -46,6 +46,12 @@ export type AdminHealth = {
   codex: { client_version: string; default_model?: string; fast_mode?: boolean };
 };
 
+// 重新导入 Codex 登录后的状态响应。
+export type AuthReloadResult = {
+  oauth: { available: boolean; expired?: boolean; reloaded: boolean };
+  message?: string;
+};
+
 // 请求日志列表中的单条元数据记录。
 export type RequestLogItem = {
   id: string;

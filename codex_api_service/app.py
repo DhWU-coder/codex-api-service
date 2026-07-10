@@ -259,10 +259,9 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
         _require_local_auth(request, app_config)
         credentials = auth.load()
         urls = _startup_urls(app_config)
-        oauth_expired = credentials_expired_or_near(credentials) if credentials is not None else False
         return {
             "server": urls,
-            "oauth": {"available": credentials is not None, "expired": oauth_expired},
+            "oauth": _oauth_status(credentials),
             "usage": {
                 "enabled": app_config.usage.enabled,
                 "path": str(app_config.usage.path),
@@ -275,6 +274,21 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
                 "fast_mode": app_config.codex.fast_mode,
             },
         }
+
+    @app.post("/admin/auth/reload")
+    async def admin_auth_reload(request: Request) -> Any:
+        """从 Codex CLI/App 登录文件重新导入 OAuth 凭据。"""
+        _require_local_auth(request, app_config)
+        credentials = auth.reload_import_credentials()
+        if credentials is None:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "oauth": _oauth_status(None, reloaded=False),
+                    "message": "未找到可用的 Codex 登录凭据，请先在 Codex CLI 或 App 完成登录",
+                },
+            )
+        return {"oauth": _oauth_status(credentials, reloaded=True)}
 
     @app.get("/admin/requests")
     async def admin_requests(request: Request, limit: int = 100) -> dict[str, Any]:
@@ -315,6 +329,17 @@ def _require_local_auth(request: Request, config: AppConfig) -> None:
     if request.headers.get("x-api-key") == api_key:
         return
     raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _oauth_status(credentials: Any | None, *, reloaded: bool | None = None) -> dict[str, Any]:
+    """把 OAuth 凭据转换成控制台安全状态，不暴露 token 内容。"""
+    status = {
+        "available": credentials is not None,
+        "expired": credentials_expired_or_near(credentials) if credentials is not None else False,
+    }
+    if reloaded is not None:
+        status["reloaded"] = reloaded
+    return status
 
 
 def _chat_body_to_codex_payload(body: dict[str, Any], config: AppConfig, model: str) -> dict[str, Any]:

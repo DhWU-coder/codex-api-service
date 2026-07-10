@@ -61,7 +61,7 @@ const requestLogItems = [
 ];
 
 describe("App theme mode", () => {
-  let capturedRequests: Array<{ url: string; method: string; body: unknown }> = [];
+  let capturedRequests: Array<{ url: string; method: string; body?: unknown }> = [];
   let healthEndpointAvailable = true;
   let healthResponse = adminHealth;
 
@@ -101,10 +101,12 @@ describe("App theme mode", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const method = init?.method || "GET";
+        const capturedRequest: { url: string; method: string; body?: unknown } = { url, method };
         if (init?.body) {
           // 记录前端发出的 JSON body，便于断言聊天和配置保存参数。
-          capturedRequests.push({ url, method, body: JSON.parse(String(init.body)) });
+          capturedRequest.body = JSON.parse(String(init.body));
         }
+        capturedRequests.push(capturedRequest);
         if (url.startsWith("/admin/requests")) {
           return new Response(JSON.stringify({ items: requestLogItems }), { status: 200 });
         }
@@ -122,6 +124,11 @@ describe("App theme mode", () => {
         }
         if (url === "/admin/config" && method === "PATCH") {
           return new Response(JSON.stringify({ restart_required: true }), { status: 200 });
+        }
+        if (url === "/admin/auth/reload" && method === "POST") {
+          return new Response(JSON.stringify({ oauth: { available: true, expired: false, reloaded: true } }), {
+            status: 200
+          });
         }
         return new Response(JSON.stringify(adminConfig), { status: 200 });
       })
@@ -184,6 +191,20 @@ describe("App theme mode", () => {
     expect(await screen.findByText("需要检查")).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: "配置" }));
     expect(await screen.findByText("登录：已过期")).toBeTruthy();
+  });
+
+  it("syncs the latest Codex login from the config page", async () => {
+    // Web 控制台应提供手动同步入口，用于本服务缓存旧 OAuth token 的场景。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "配置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "同步 Codex 登录" }));
+
+    await waitFor(() => {
+      expect(
+        capturedRequests.some((request) => request.url === "/admin/auth/reload" && request.method === "POST")
+      ).toBe(true);
+    });
+    expect(await screen.findByText("已同步 Codex 登录")).toBeTruthy();
   });
 
   it("shows restart guidance when the runtime health endpoint is unavailable", async () => {

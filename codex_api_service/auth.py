@@ -133,6 +133,14 @@ class CodexAuth:
             return None
         return imported
 
+    def reload_import_credentials(self) -> CodexCredentials | None:
+        """重新导入 Codex CLI/App 的有效 OAuth 凭据。"""
+        imported = self._load_valid_import_credentials()
+        if imported is None:
+            return None
+        self.save(imported)
+        return imported
+
     def save(self, credentials: CodexCredentials) -> None:
         """保存 OAuth 凭据到本服务 auth 文件。"""
         _write_auth_file(self.auth_path, credentials)

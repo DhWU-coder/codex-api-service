@@ -1,11 +1,14 @@
 import pytest
 
+from codex_api_service.auth import CodexCredentials
 from codex_api_service.codex_client import (
+    CodexClient,
     CodexUnexpectedResponseError,
     _codex_headers,
     _non_sse_response_event,
     _sse_body_events,
 )
+from codex_api_service.config import CodexConfig
 
 
 def test_codex_headers_do_not_advertise_service_package_version_as_codex_version() -> None:
@@ -50,3 +53,95 @@ def test_sse_body_is_parsed_even_when_content_type_is_missing() -> None:
 
     # 只提取 JSON data 事件，[DONE] 和 event 行会被忽略。
     assert _sse_body_events(body) == [{"type": "response.output_text.delta", "delta": "OK"}]
+
+
+@pytest.mark.asyncio
+async def test_stream_response_reloads_imported_credentials_when_access_token_is_revoked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证 access token 被上游撤销时会导入新 Codex 登录并重试一次。"""
+
+    class RecoveringAuth:
+        """模拟本服务有旧 token，同时 Codex CLI 已经写入新 token。"""
+
+        def __init__(self) -> None:
+            """记录导入次数，方便断言恢复路径确实被触发。"""
+            self.current = CodexCredentials(access="old-access", refresh="old-refresh", expires=4_102_444_800_000)
+            self.reload_count = 0
+
+        def ensure_credentials(self) -> CodexCredentials:
+            """返回当前服务缓存的凭据。"""
+            return self.current
+
+        def reload_import_credentials(self) -> CodexCredentials | None:
+            """模拟从 Codex CLI/App auth.json 导入最新凭据。"""
+            self.reload_count += 1
+            self.current = CodexCredentials(access="fresh-access", refresh="fresh-refresh", expires=4_102_444_800_000)
+            return self.current
+
+    class FakeStreamResponse:
+        """提供 httpx stream response 所需的最小异步接口。"""
+
+        def __init__(self, *, status_code: int, body: str = "", lines: list[str] | None = None) -> None:
+            """保存 fake 响应状态、错误 body 和 SSE 行。"""
+            self.status_code = status_code
+            self.body = body
+            self.lines = lines or []
+            self.headers = {"content-type": "text/event-stream"}
+
+        async def __aenter__(self) -> "FakeStreamResponse":
+            """进入异步上下文并返回自身。"""
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            """退出异步上下文时无需清理资源。"""
+            return None
+
+        async def aread(self) -> bytes:
+            """返回错误响应体。"""
+            return self.body.encode("utf-8")
+
+        async def aiter_lines(self):
+            """逐行返回 SSE 内容。"""
+            for line in self.lines:
+                yield line
+
+    class FakeAsyncClient:
+        """替代 httpx.AsyncClient，记录每次请求使用的 Authorization。"""
+
+        responses = [
+            FakeStreamResponse(
+                status_code=401,
+                body='{"error":{"message":"Encountered invalidated oauth token for user","code":"token_revoked"}}',
+            ),
+            FakeStreamResponse(
+                status_code=200,
+                lines=['data: {"type":"response.output_text.delta","delta":"OK"}', "data: [DONE]"],
+            ),
+        ]
+        authorizations: list[str] = []
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """忽略 timeout 等构造参数。"""
+            return None
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            """进入异步上下文并返回自身。"""
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            """退出异步上下文时无需清理资源。"""
+            return None
+
+        def stream(self, _method: str, _url: str, *, headers: dict[str, str], json: dict) -> FakeStreamResponse:
+            """返回预设响应，并记录请求头。"""
+            self.authorizations.append(headers["Authorization"])
+            return self.responses.pop(0)
+
+    monkeypatch.setattr("codex_api_service.codex_client.httpx.AsyncClient", FakeAsyncClient)
+    auth = RecoveringAuth()
+    client = CodexClient(auth=auth, config=CodexConfig(responses_url="https://example.test/codex"))
+
+    events = [event async for event in client.stream_response({"model": "gpt-5.5"})]
+
+    assert events == [{"type": "response.output_text.delta", "delta": "OK"}]
+    assert FakeAsyncClient.authorizations == ["Bearer old-access", "Bearer fresh-access"]
+    assert auth.reload_count == 1

@@ -25,6 +25,7 @@ import {
   fetchAdminConfig,
   fetchRequestLogs,
   parseChatStreamLine,
+  reloadCodexAuth,
   saveAdminConfig
 } from "./api";
 import { formatCompactNumber, formatDuration, summarizeRequestLogs } from "./dashboard";
@@ -234,6 +235,8 @@ export function App() {
   const [config, setConfig] = useState<AdminConfig | null>(null);
   const [configForm, setConfigForm] = useState<ConfigFormState | null>(null);
   const [configSavedNote, setConfigSavedNote] = useState("");
+  const [authReloadNote, setAuthReloadNote] = useState("");
+  const [isReloadingAuth, setIsReloadingAuth] = useState(false);
   const [logSearch, setLogSearch] = useState("");
   const [logStatusFilter, setLogStatusFilter] = useState("all");
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
@@ -484,6 +487,22 @@ export function App() {
       setError(caught instanceof Error ? caught.message : "配置保存失败");
     }
   }, [apiKey, configForm, loadConfig, loadHealth]);
+
+  // 从 Codex CLI/App 的登录文件同步 OAuth 凭据，解决本服务缓存旧 token 的场景。
+  const reloadAuth = useCallback(async () => {
+    try {
+      setError("");
+      setAuthReloadNote("");
+      setIsReloadingAuth(true);
+      const result = await reloadCodexAuth(apiKey);
+      setAuthReloadNote(result.oauth.reloaded ? "已同步 Codex 登录" : result.message || "未同步 Codex 登录");
+      await loadHealth();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "OAuth 同步失败");
+    } finally {
+      setIsReloadingAuth(false);
+    }
+  }, [apiKey, loadHealth]);
 
   // Token 拆分按实际组成计算占比；没有 usage 时保持 0 宽度。
   const tokenBreakdownTotal = TOKEN_BREAKDOWN_ITEMS.reduce(
@@ -927,8 +946,22 @@ export function App() {
 
             <div className="runtime-detail-panel" aria-label="运行状态详情">
               <div className="runtime-detail-head">
-                <h3>运行状态</h3>
-                <p>{runtimeStatus.hint}</p>
+                <div>
+                  <h3>运行状态</h3>
+                  <p>{runtimeStatus.hint}</p>
+                </div>
+                <div className="runtime-detail-actions">
+                  {authReloadNote ? (
+                    <span className="saved-note">
+                      <CheckCircle2 size={16} />
+                      {authReloadNote}
+                    </span>
+                  ) : null}
+                  <button className="secondary-button" onClick={() => void reloadAuth()} disabled={isReloadingAuth}>
+                    <KeyRound size={16} />
+                    {isReloadingAuth ? "同步中" : "同步 Codex 登录"}
+                  </button>
+                </div>
               </div>
               <div className="runtime-detail-grid">
                 {runtimeStatus.details.map((detail) => (

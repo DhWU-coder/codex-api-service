@@ -97,47 +97,71 @@ class CodexClient:
 
     async def _stream_response_once(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         """执行单次 Codex SSE HTTP 请求。"""
-        # ensure_credentials 会在必要时刷新 token 或触发首次登录。
-        credentials = self.auth.ensure_credentials()
         request_payload = dict(payload)
         request_payload["stream"] = True
+        reloaded_after_revocation = False
 
-        # read=None 允许长时间流式输出；connect 仍保留超时避免卡在握手。
-        timeout = httpx.Timeout(self.config.timeout_seconds, connect=30.0, read=None)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream(
-                "POST",
-                self.config.responses_url,
-                headers=_codex_headers(credentials.access),
-                json=request_payload,
-            ) as response:
-                if response.status_code >= 400:
-                    body = (await response.aread()).decode("utf-8", errors="replace")
-                    raise CodexHTTPStatusError(response.status_code, body)
+        while True:
+            # ensure_credentials 会在必要时刷新 token 或触发首次登录。
+            credentials = self.auth.ensure_credentials()
 
-                # 非 SSE JSON 响应也兼容成 completed 事件，便于后续扩展。
-                content_type = response.headers.get("content-type", "")
-                if "text/event-stream" not in content_type:
-                    body = (await response.aread()).decode("utf-8", errors="replace")
-                    buffered_events = _sse_body_events(body)
-                    if buffered_events:
-                        # 某些上游响应漏掉 content-type，但 body 仍是标准 SSE 行。
-                        for event in buffered_events:
-                            yield event
+            # read=None 允许长时间流式输出；connect 仍保留超时避免卡在握手。
+            timeout = httpx.Timeout(self.config.timeout_seconds, connect=30.0, read=None)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST",
+                    self.config.responses_url,
+                    headers=_codex_headers(credentials.access),
+                    json=request_payload,
+                ) as response:
+                    if response.status_code >= 400:
+                        body = (await response.aread()).decode("utf-8", errors="replace")
+                        if not reloaded_after_revocation and _is_revoked_oauth_token(response.status_code, body):
+                            imported = self.auth.reload_import_credentials()
+                            if imported is not None:
+                                reloaded_after_revocation = True
+                                continue
+                        raise CodexHTTPStatusError(response.status_code, body)
+
+                    # 非 SSE JSON 响应也兼容成 completed 事件，便于后续扩展。
+                    content_type = response.headers.get("content-type", "")
+                    if "text/event-stream" not in content_type:
+                        body = (await response.aread()).decode("utf-8", errors="replace")
+                        buffered_events = _sse_body_events(body)
+                        if buffered_events:
+                            # 某些上游响应漏掉 content-type，但 body 仍是标准 SSE 行。
+                            for event in buffered_events:
+                                yield event
+                            return
+                        yield _non_sse_response_event(
+                            status_code=response.status_code,
+                            content_type=content_type,
+                            body=body,
+                        )
                         return
-                    yield _non_sse_response_event(
-                        status_code=response.status_code,
-                        content_type=content_type,
-                        body=body,
-                    )
+
+                    # SSE 每个 data 行都是一个 JSON event；[DONE] 表示流结束。
+                    async for line in response.aiter_lines():
+                        event = _parse_sse_line(line)
+                        if event is None:
+                            continue
+                        yield event
                     return
 
-                # SSE 每个 data 行都是一个 JSON event；[DONE] 表示流结束。
-                async for line in response.aiter_lines():
-                    event = _parse_sse_line(line)
-                    if event is None:
-                        continue
-                    yield event
+
+def _is_revoked_oauth_token(status_code: int, body: str) -> bool:
+    """判断上游 401 是否表示当前 access token 已被撤销。"""
+    if status_code != 401:
+        return False
+    lowered = body.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "token_revoked",
+            "invalidated oauth token",
+            "oauth token revoked",
+        )
+    )
 
 
 def _codex_headers(access_token: str) -> dict[str, str]:

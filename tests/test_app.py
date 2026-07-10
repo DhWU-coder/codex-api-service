@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 
 from codex_api_service.app import create_app
 from codex_api_service.codex_client import CodexHTTPStatusError, CodexUnexpectedResponseError
-from codex_api_service.config import AppConfig, ApiConfig, CodexConfig, ServerConfig, UsageConfig
+from codex_api_service.config import AppConfig, ApiConfig, AuthConfig, CodexConfig, ServerConfig, UsageConfig
 
 
 class FakeCodexClient:
@@ -133,6 +133,24 @@ def make_standard_test_config(tmp_path: Path) -> AppConfig:
         api=ApiConfig(local_api_key=None),
         codex=CodexConfig(default_model="gpt-5.5", fast_mode=False),
         usage=UsageConfig(path=tmp_path / ".codex-usage" / "usage.jsonl"),
+    )
+
+
+def write_oauth_file(path: Path, *, access: str, refresh: str, expires: int) -> None:
+    """写入测试用 OAuth 文件，避免依赖真实本机登录。"""
+    path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": access,
+                    "refresh_token": refresh,
+                    "account_id": "acct_test",
+                },
+                "expires": expires,
+            }
+        ),
+        encoding="utf-8",
     )
 
 
@@ -557,6 +575,31 @@ async def test_local_api_key_is_required_when_configured(tmp_path: Path) -> None
     assert denied.json()["error"]["type"] == "authentication_error"
     assert denied.json()["error"]["message"] == "Unauthorized"
     assert allowed.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_admin_auth_reload_imports_latest_codex_login(tmp_path: Path) -> None:
+    """验证管理接口可以用 Codex CLI/App 的新登录覆盖本服务旧缓存。"""
+    local_auth = tmp_path / "service-auth.json"
+    import_auth = tmp_path / "codex-auth.json"
+    write_oauth_file(local_auth, access="old-access", refresh="old-refresh", expires=4_102_444_800_000)
+    write_oauth_file(import_auth, access="fresh-access", refresh="fresh-refresh", expires=4_102_444_800_000)
+    config = AppConfig(
+        project_root=tmp_path,
+        server=ServerConfig(host="127.0.0.1", port=1219),
+        codex=CodexConfig(default_model="gpt-5.5"),
+        usage=UsageConfig(path=tmp_path / ".codex-usage" / "usage.jsonl"),
+        auth=AuthConfig(auth_path=local_auth, import_auth_path=import_auth),
+    )
+    app = create_app(config=config, codex_client=FakeCodexClient())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/admin/auth/reload")
+
+    assert response.status_code == 200
+    assert response.json()["oauth"] == {"available": True, "expired": False, "reloaded": True}
+    saved = json.loads(local_auth.read_text(encoding="utf-8"))
+    assert saved["tokens"]["access_token"] == "fresh-access"
 
 
 @pytest.mark.asyncio

@@ -957,8 +957,19 @@ th {
 
 /* 运行状态标题和说明保持紧凑，避免挤压配置表单。 */
 .runtime-detail-head {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+/* OAuth 同步操作靠右放置，和只读状态说明保持层级区分。 */
+.runtime-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 /* 配置页内标题使用面板级字号，不做英雄化处理。 */
@@ -1070,6 +1081,14 @@ th {
 
   .config-grid {
     grid-template-columns: 1fr;
+  }
+
+  .runtime-detail-head {
+    flex-direction: column;
+  }
+
+  .runtime-detail-actions {
+    justify-content: flex-start;
   }
 
   .runtime-detail-grid {
