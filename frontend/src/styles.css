@@ -1251,10 +1251,90 @@ button:disabled {
 /* 日志筛选区提供文本搜索和状态过滤。 */
 .log-controls {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 180px;
+  grid-template-columns: minmax(220px, 1fr) 180px 180px;
   gap: 10px;
   padding: 14px 18px 6px;
   border-bottom: 1px solid var(--panel-divider);
+}
+
+/* 加载数量将说明和选择器收在同一控件内，避免占用额外纵向空间。 */
+.log-limit-field {
+  display: grid;
+  grid-template-columns: auto minmax(96px, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--page-muted);
+  font-size: 13px;
+}
+
+/* 虚拟日志表格自身承担横纵滚动，全部历史也只渲染可见行。 */
+.virtual-log-table {
+  height: min(608px, calc(100vh - 330px));
+  min-height: 320px;
+  margin: 8px 18px 18px;
+  overflow: auto;
+  border: 1px solid var(--table-border);
+  border-radius: 10px;
+}
+
+/* 表头和数据行共用列宽，保持滚动前后严格对齐。 */
+.virtual-log-grid {
+  display: grid;
+  grid-template-columns: 120px 220px 180px 80px 100px repeat(4, 80px) minmax(220px, 1fr);
+  align-items: center;
+  min-width: 1260px;
+}
+
+/* 表头固定在滚动容器顶部。 */
+.virtual-log-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 48px;
+  color: var(--table-head);
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--table-border);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.virtual-log-header > div,
+.virtual-log-main > div {
+  min-width: 0;
+  padding: 0 10px;
+}
+
+/* 占位层只提供完整滚动高度，真实行使用绝对定位覆盖在对应位置。 */
+.virtual-log-spacer {
+  position: relative;
+  min-width: 1260px;
+}
+
+.virtual-log-item {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  overflow: hidden;
+  border-bottom: 1px solid var(--table-border);
+}
+
+/* 主日志行固定为 48px，使虚拟窗口可以常数时间定位。 */
+.virtual-log-main {
+  height: 48px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.virtual-log-main:hover {
+  background: color-mix(in srgb, var(--primary-bg) 8%, transparent);
+}
+
+/* 展开详情占用算法约定的 88px，并允许长错误自动换行。 */
+.virtual-log-item .log-detail {
+  height: 88px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--panel-bg) 72%, var(--primary-bg) 8%);
 }
 
 /* 日志表格用于高密度扫描请求元数据。 */

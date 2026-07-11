@@ -37,6 +37,7 @@ from .anthropic_compat import (
 from .auth import CodexAuth, credentials_expired_or_near
 from .codex_client import CodexClient, CodexHTTPStatusError, _codex_client_version
 from .config import AppConfig, load_config
+from .dashboard_summary import summarize_request_logs
 from .model_catalog import (
     CodexModelCatalog,
     ModelCatalogSnapshot,
@@ -322,6 +323,19 @@ def create_app(
         """返回最近 API 请求元数据。"""
         _require_local_auth(request, app_config)
         return {"items": request_log.list_recent(limit=limit)}
+
+    @app.get("/admin/dashboard")
+    async def admin_dashboard(request: Request, range: str = "today", recent_days: int = 7) -> dict[str, Any]:
+        """按完整持久化历史返回轻量看板聚合结果。"""
+        _require_local_auth(request, app_config)
+        try:
+            return summarize_request_logs(
+                request_log.list_recent(limit="all"),
+                range_preset=range,
+                recent_days=max(1, min(recent_days, 365)),
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.get("/ui", response_class=HTMLResponse)
     async def ui_index() -> Any:

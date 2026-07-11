@@ -53,6 +53,8 @@ class RequestLogStore:
         self.path = path
         self.usage_path = usage_path
         self._items: deque[RequestLogEntry] = deque(maxlen=max_entries)
+        self._history_cache: list[RequestLogEntry] | None = None
+        self._history_signature: tuple[tuple[int, int] | None, ...] | None = None
         self._load_existing_items()
 
     def record(
@@ -84,6 +86,8 @@ class RequestLogStore:
         )
         self._items.appendleft(entry)
         self._append_persisted_entry(entry)
+        # 新记录已经落盘，下一次读取历史时需要重建缓存。
+        self._history_cache = None
         return entry
 
     def list_recent(self, *, limit: int | str = 100) -> list[dict[str, Any]]:
@@ -92,32 +96,50 @@ class RequestLogStore:
         if isinstance(limit, str) and limit.lower() == "all":
             return [item.to_dict() for item in self._all_entries()]
 
-        # limit 防止管理接口一次返回过多数据。
+        # 数字限制覆盖日志页预设档位；更大的历史读取使用显式 all。
         try:
-            safe_limit = max(1, min(int(limit), 500))
+            safe_limit = max(1, min(int(limit), 5000))
         except (TypeError, ValueError):
             safe_limit = 100
-        return [item.to_dict() for item in list(self._items)[:safe_limit]]
+        memory_items = list(self._items)
+        if safe_limit <= len(memory_items):
+            return [item.to_dict() for item in memory_items[:safe_limit]]
+        return [item.to_dict() for item in self._all_entries()[:safe_limit]]
 
     def _load_existing_items(self) -> None:
         """从 JSONL 文件加载历史请求元数据。"""
-        loaded = self._read_persisted_entries()
+        loaded = self._all_entries()
 
         if not loaded:
             return
 
-        # 按时间排序后只保留最近 maxlen 条，避免不同来源加载顺序影响展示。
-        loaded.sort(key=lambda entry: entry.timestamp)
-        # 文件按旧到新追加，内存按新到旧展示。
-        for entry in loaded[-self._items.maxlen :]:
+        # 历史缓存按新到旧；反向插入 deque 后仍保持新记录在最前。
+        for entry in reversed(loaded[: self._items.maxlen]):
             self._items.appendleft(entry)
 
     def _all_entries(self) -> list[RequestLogEntry]:
         """读取全部持久化请求日志，并按时间倒序返回。"""
+        signature = self._persisted_signature()
+        if self._history_cache is not None and signature == self._history_signature:
+            return self._history_cache
+
         loaded = self._read_persisted_entries()
         if not loaded:
             return list(self._items)
-        return sorted(loaded, key=lambda entry: entry.timestamp, reverse=True)
+        self._history_cache = sorted(loaded, key=lambda entry: entry.timestamp, reverse=True)
+        self._history_signature = signature
+        return self._history_cache
+
+    def _persisted_signature(self) -> tuple[tuple[int, int] | None, ...]:
+        """用文件大小和纳秒修改时间判断历史缓存是否仍有效。"""
+
+        def file_signature(path: Path | None) -> tuple[int, int] | None:
+            if path is None or not path.exists():
+                return None
+            stat = path.stat()
+            return stat.st_size, stat.st_mtime_ns
+
+        return file_signature(self.path), file_signature(self.usage_path)
 
     def _read_persisted_entries(self) -> list[RequestLogEntry]:
         """从新版请求日志和旧版 usage 日志读取全部可用历史。"""

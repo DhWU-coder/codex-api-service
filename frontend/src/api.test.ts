@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { buildAuthHeaders, fetchAdminModels, parseChatStreamLine } from "./api";
+import { buildAuthHeaders, fetchAdminModels, fetchDashboardSummary, parseChatStreamLine } from "./api";
 
 describe("frontend api helpers", () => {
   it("builds bearer headers only when api key is present", () => {
@@ -66,6 +66,23 @@ describe("frontend api helpers", () => {
     await fetchAdminModels("local-secret", true);
 
     expect(requests).toEqual(["/admin/models", "/admin/models?refresh=true"]);
+    vi.unstubAllGlobals();
+  });
+
+  it("fetches the server-side dashboard summary for the selected range", async () => {
+    // 看板查询只传范围和最近天数，不再下载完整请求日志。
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        requests.push(String(input));
+        return new Response(JSON.stringify({ requestCount: 0 }), { status: 200 });
+      })
+    );
+
+    await fetchDashboardSummary("local-secret", "recent", 30);
+
+    expect(requests).toEqual(["/admin/dashboard?range=recent&recent_days=30"]);
     vi.unstubAllGlobals();
   });
 });

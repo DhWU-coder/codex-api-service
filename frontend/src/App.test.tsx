@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
+import { summarizeRequestLogs } from "./dashboard";
 
 // 管理接口的最小配置响应，保证 App 初始化时不会访问真实后端。
 const adminConfig = {
@@ -93,6 +94,7 @@ describe("App theme mode", () => {
   let modelEndpointAvailable = true;
   let healthResponse = adminHealth;
   let modelCatalogResponse = adminModelCatalog;
+  let requestLogsResponse = requestLogItems;
 
   beforeEach(() => {
     capturedRequests = [];
@@ -100,6 +102,7 @@ describe("App theme mode", () => {
     modelEndpointAvailable = true;
     healthResponse = { ...adminHealth, oauth: { ...adminHealth.oauth } };
     modelCatalogResponse = adminModelCatalog;
+    requestLogsResponse = requestLogItems;
 
     // 用内存版 localStorage 规避 jsdom 在当前环境里的存储实现差异。
     const memoryStorage = new Map<string, string>();
@@ -138,8 +141,23 @@ describe("App theme mode", () => {
           capturedRequest.body = JSON.parse(String(init.body));
         }
         capturedRequests.push(capturedRequest);
+        if (url.startsWith("/admin/dashboard")) {
+          const params = new URL(url, "http://test").searchParams;
+          return new Response(
+            JSON.stringify(
+              summarizeRequestLogs(requestLogItems, {
+                preset: (params.get("range") || "today") as "today" | "week" | "month" | "all" | "recent",
+                recentDays: Number(params.get("recent_days") || 7),
+                now: new Date("2026-06-16T12:00:00Z")
+              })
+            ),
+            { status: 200 }
+          );
+        }
         if (url.startsWith("/admin/requests")) {
-          return new Response(JSON.stringify({ items: requestLogItems }), { status: 200 });
+          const limit = new URL(url, "http://test").searchParams.get("limit") || "1000";
+          const items = limit === "all" ? requestLogsResponse : requestLogsResponse.slice(0, Number(limit));
+          return new Response(JSON.stringify({ items }), { status: 200 });
         }
         if (url === "/admin/health") {
           if (!healthEndpointAvailable) {
@@ -209,7 +227,10 @@ describe("App theme mode", () => {
     expect(await screen.findByRole("heading", { name: "模型分布" })).toBeTruthy();
     expect(await screen.findByLabelText("06/16 · 60 tokens · 输入 32 · 输出 23 · 2 次成功请求")).toBeTruthy();
     expect(await screen.findByText("总 60 tokens")).toBeTruthy();
-    expect(capturedRequests.some((request) => request.url === "/admin/requests?limit=all")).toBe(true);
+    await waitFor(() => {
+      expect(capturedRequests.some((request) => request.url === "/admin/dashboard?range=all&recent_days=7")).toBe(true);
+    });
+    expect(capturedRequests.some((request) => request.url.startsWith("/admin/requests"))).toBe(false);
   });
 
   it("moves detailed runtime status to the config page", async () => {
@@ -408,6 +429,9 @@ describe("App theme mode", () => {
     // 日志页应支持按文本过滤，并能展开查看 request id 和完整错误字段。
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "请求日志" }));
+    await waitFor(() => {
+      expect(capturedRequests.some((request) => request.url === "/admin/requests?limit=1000")).toBe(true);
+    });
     fireEvent.change(await screen.findByPlaceholderText("搜索日志"), { target: { value: "/v1/responses" } });
 
     expect(await screen.findByText("/v1/responses")).toBeTruthy();
@@ -416,5 +440,33 @@ describe("App theme mode", () => {
     fireEvent.click(screen.getByText("/v1/responses"));
     expect(await screen.findByText("request id")).toBeTruthy();
     expect(await screen.findByText("resp_1")).toBeTruthy();
+  });
+
+  it("selects the request log count and virtualizes large results", async () => {
+    // 即使选择全部，页面也只创建视口附近的日志行。
+    requestLogsResponse = Array.from({ length: 3000 }, (_, index) => ({
+      ...requestLogItems[index % requestLogItems.length],
+      id: `large_${index}`,
+      request_id: `resp_large_${index}`
+    }));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "请求日志" }));
+
+    const limitSelect = (await screen.findByLabelText("日志加载数量")) as HTMLSelectElement;
+    expect(limitSelect.value).toBe("1000");
+    await waitFor(() => {
+      expect(screen.getAllByRole("row").length).toBeLessThan(50);
+    });
+
+    fireEvent.change(limitSelect, { target: { value: "5000" } });
+    await waitFor(() => {
+      expect(capturedRequests.some((request) => request.url === "/admin/requests?limit=5000")).toBe(true);
+    });
+
+    fireEvent.change(limitSelect, { target: { value: "all" } });
+    await waitFor(() => {
+      expect(capturedRequests.some((request) => request.url === "/admin/requests?limit=all")).toBe(true);
+    });
+    expect(screen.getAllByRole("row").length).toBeLessThan(50);
   });
 });

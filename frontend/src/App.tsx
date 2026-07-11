@@ -18,12 +18,13 @@ import {
   Square,
   Zap
 } from "lucide-react";
-import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   buildAuthHeaders,
   fetchAdminHealth,
   fetchAdminConfig,
+  fetchDashboardSummary,
   fetchAdminModels,
   fetchRequestLogs,
   parseChatStreamLine,
@@ -37,6 +38,7 @@ import {
   summarizeRequestLogs,
   type DashboardDistributionItem,
   type DashboardRangePreset,
+  type DashboardSummary,
   type DashboardTimelineBucket
 } from "./dashboard";
 import {
@@ -44,6 +46,7 @@ import {
   requestDefaultsForModel,
   serializeModelRequestOverrides
 } from "./modelRequestConfig";
+import { calculateVirtualLogWindow } from "./logVirtualization";
 import type {
   AdminConfig,
   AdminHealth,
@@ -63,9 +66,6 @@ type ThemeMode = "light" | "dark";
 
 // 主题选择保存在本地浏览器，刷新后保持用户偏好。
 const THEME_STORAGE_KEY = "codex-console-theme";
-
-// 本地控制台默认读取全部持久化请求日志，让看板和日志页统计口径一致。
-const REQUEST_LOG_LIMIT = "all";
 
 // 没有目录元数据时保留旧四档，保证配置兜底仍可编辑。
 const DEFAULT_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"];
@@ -476,11 +476,18 @@ export function App() {
   const [isReloadingAuth, setIsReloadingAuth] = useState(false);
   const [dashboardPreset, setDashboardPreset] = useState<DashboardRangePreset>("today");
   const [dashboardRecentDays, setDashboardRecentDays] = useState(7);
+  const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary>(() =>
+    summarizeRequestLogs([], { preset: "today", recentDays: 7 })
+  );
+  const [requestLogLimit, setRequestLogLimit] = useState<number | "all">(1000);
+  const [isLoadingLogs, setIsLoadingLogs] = useState(false);
   const [logSearch, setLogSearch] = useState("");
   const [logStatusFilter, setLogStatusFilter] = useState("all");
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
+  const [logScrollTop, setLogScrollTop] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
+  const logScrollRef = useRef<HTMLDivElement | null>(null);
   const modelRequestDirtyRef = useRef(false);
 
   // layout effect 可以在浏览器绘制前应用主题，避免启动时闪一下错误主题。
@@ -503,12 +510,6 @@ export function App() {
   useEffect(() => {
     localStorage.setItem("codex-console-api-key", apiKey);
   }, [apiKey]);
-
-  // 当前日志统计摘要，驱动看板和日志页顶部信息。
-  const dashboardSummary = useMemo(
-    () => summarizeRequestLogs(logs, { preset: dashboardPreset, recentDays: dashboardRecentDays }),
-    [dashboardPreset, dashboardRecentDays, logs]
-  );
 
   // 读取管理配置，并把可编辑字段放进表单。
   const loadConfig = useCallback(async () => {
@@ -550,16 +551,30 @@ export function App() {
     }
   }, [apiKey]);
 
-  // 读取最近请求日志，日志不包含 prompt 和响应正文。
-  const loadLogs = useCallback(async () => {
+  // 读取看板聚合结果，不再为首页下载完整请求日志。
+  const loadDashboard = useCallback(async () => {
     try {
       setError("");
-      const items = await fetchRequestLogs(apiKey, REQUEST_LOG_LIMIT);
+      const summary = await fetchDashboardSummary(apiKey, dashboardPreset, dashboardRecentDays);
+      setDashboardSummary(summary);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "看板读取失败");
+    }
+  }, [apiKey, dashboardPreset, dashboardRecentDays]);
+
+  // 仅在进入日志页或主动刷新时读取明细，默认加载最近 1000 条。
+  const loadLogs = useCallback(async (limit: number | "all" = requestLogLimit) => {
+    try {
+      setError("");
+      setIsLoadingLogs(true);
+      const items = await fetchRequestLogs(apiKey, limit);
       setLogs(items);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "请求日志读取失败");
+    } finally {
+      setIsLoadingLogs(false);
     }
-  }, [apiKey]);
+  }, [apiKey, requestLogLimit]);
 
   // 配置加载成功后，同步默认模型和动态目录到聊天区。
   useEffect(() => {
@@ -567,10 +582,10 @@ export function App() {
     void loadModelCatalog();
   }, [loadConfig, loadModelCatalog]);
 
-  // 看板是默认首页，启动时主动加载最近请求日志。
+  // 看板是默认首页，启动时只读取服务端聚合数据。
   useEffect(() => {
-    void loadLogs();
-  }, [loadLogs]);
+    void loadDashboard();
+  }, [loadDashboard]);
 
   // 健康状态变化频率低，初始化和访问密钥变化时读取即可。
   useEffect(() => {
@@ -677,7 +692,7 @@ export function App() {
           }
         }
         setStatus(hadStreamError ? "失败" : "完成");
-        void loadLogs();
+        void loadDashboard();
       } catch (caught) {
         if ((caught as Error).name === "AbortError") {
           setStatus("已停止");
@@ -690,7 +705,7 @@ export function App() {
         abortRef.current = null;
       }
     },
-    [apiKey, fastMode, input, isStreaming, loadLogs, messages, model, reasoningEffort]
+    [apiKey, fastMode, input, isStreaming, loadDashboard, messages, model, reasoningEffort]
   );
 
   // 停止当前流式请求。
@@ -793,6 +808,45 @@ export function App() {
     });
   }, [logSearch, logStatusFilter, logs]);
 
+  // 日志页摘要只统计当前已加载且经过筛选的明细。
+  const loadedLogSummary = useMemo(
+    () => summarizeRequestLogs(filteredLogs, { preset: "all" }),
+    [filteredLogs]
+  );
+  const expandedLogIndex = useMemo(
+    () => filteredLogs.findIndex((item) => item.id === expandedLogId),
+    [expandedLogId, filteredLogs]
+  );
+  const virtualLogWindow = useMemo(
+    () =>
+      calculateVirtualLogWindow({
+        itemCount: filteredLogs.length,
+        scrollTop: logScrollTop,
+        viewportHeight: 512,
+        expandedIndex: expandedLogIndex >= 0 ? expandedLogIndex : undefined
+      }),
+    [expandedLogIndex, filteredLogs.length, logScrollTop]
+  );
+
+  // 日志集合或筛选条件变化后回到顶部，避免旧滚动位置落到空白区域。
+  useEffect(() => {
+    setLogScrollTop(0);
+    setExpandedLogId(null);
+    if (logScrollRef.current) {
+      logScrollRef.current.scrollTop = 0;
+    }
+  }, [logSearch, logStatusFilter, logs]);
+
+  // 切换加载数量时立即读取对应范围，全部模式仍由虚拟列表控制 DOM 数量。
+  const changeRequestLogLimit = useCallback(
+    (rawValue: string) => {
+      const nextLimit: number | "all" = rawValue === "all" ? "all" : Number(rawValue);
+      setRequestLogLimit(nextLimit);
+      void loadLogs(nextLimit);
+    },
+    [loadLogs]
+  );
+
   // 中文运行状态同时驱动左侧汇总和配置页明细，避免两处文案漂移。
   const runtimeStatus = useMemo(
     () => runtimeStatusView(health, healthError),
@@ -884,7 +938,7 @@ export function App() {
             className={activeTab === "dashboard" ? "active" : ""}
             onClick={() => {
               setActiveTab("dashboard");
-              void loadLogs();
+              void loadDashboard();
             }}
           >
             <BarChart3 size={18} />
@@ -898,7 +952,7 @@ export function App() {
             className={activeTab === "logs" ? "active" : ""}
             onClick={() => {
               setActiveTab("logs");
-              void loadLogs();
+              void loadLogs(requestLogLimit);
             }}
           >
             <Activity size={18} />
@@ -960,7 +1014,7 @@ export function App() {
                   {dashboardSummary.lastUpdated}
                 </p>
               </div>
-              <button className="secondary-button" onClick={() => void loadLogs()}>
+              <button className="secondary-button" onClick={() => void loadDashboard()}>
                 <RefreshCw size={16} />
                 刷新
               </button>
@@ -1188,13 +1242,13 @@ export function App() {
               <div>
                 <h2>请求日志</h2>
                 <p>
-                  {dashboardSummary.requestCount} 条记录，{dashboardSummary.successCount} 条成功，
-                  {formatCompactNumber(dashboardSummary.totalTokens)} tokens
+                  {loadedLogSummary.requestCount} 条记录，{loadedLogSummary.successCount} 条成功，
+                  {formatCompactNumber(loadedLogSummary.totalTokens)} tokens
                 </p>
               </div>
-              <button className="secondary-button" onClick={() => void loadLogs()}>
+              <button className="secondary-button" onClick={() => void loadLogs(requestLogLimit)} disabled={isLoadingLogs}>
                 <RefreshCw size={16} />
-                刷新
+                {isLoadingLogs ? "加载中" : "刷新"}
               </button>
             </header>
             <div className="log-controls">
@@ -1208,61 +1262,82 @@ export function App() {
                 <option value="success">仅成功</option>
                 <option value="failed">仅失败</option>
               </select>
+              <label className="log-limit-field">
+                <span>加载数量</span>
+                <select
+                  aria-label="日志加载数量"
+                  value={String(requestLogLimit)}
+                  onChange={(event) => changeRequestLogLimit(event.target.value)}
+                >
+                  <option value="100">100 条</option>
+                  <option value="500">500 条</option>
+                  <option value="1000">1000 条</option>
+                  <option value="5000">5000 条</option>
+                  <option value="all">全部</option>
+                </select>
+              </label>
             </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>时间</th>
-                    <th>接口</th>
-                    <th>模型</th>
-                    <th>状态</th>
-                    <th>耗时</th>
-                    <th>Tokens</th>
-                    <th>输入</th>
-                    <th>输出</th>
-                    <th>推理</th>
-                    <th>错误</th>
-                  </tr>
-	                </thead>
-	                <tbody>
-	                  {filteredLogs.map((item) => (
-	                    <Fragment key={item.id}>
-	                      <tr
-	                        className="log-row"
-	                        onClick={() => setExpandedLogId(expandedLogId === item.id ? null : item.id)}
-	                      >
-	                        <td>{new Date(item.timestamp).toLocaleTimeString()}</td>
-	                        <td>{item.path}</td>
-	                        <td>{item.model || "-"}</td>
-	                        <td>
-	                          <span className={item.status_code < 400 ? "status-ok" : "status-fail"}>
-	                            {item.status_code}
-	                          </span>
-	                        </td>
-	                        <td>{item.duration_ms}ms</td>
-	                        <td>{item.usage?.total ?? "-"}</td>
-	                        <td>{item.usage?.input ?? "-"}</td>
-	                        <td>{item.usage?.output ?? "-"}</td>
-	                        <td>{item.usage?.reasoning ?? "-"}</td>
-	                        <td className="error-cell">{item.error || "-"}</td>
-	                      </tr>
-	                      {expandedLogId === item.id ? (
-	                        <tr className="log-detail-row">
-	                          <td colSpan={10}>
-	                            <div className="log-detail">
-	                              <span>request id</span>
-	                              <strong>{item.request_id || "-"}</strong>
-	                              <span>错误</span>
-	                              <strong>{item.error || "-"}</strong>
-	                            </div>
-	                          </td>
-	                        </tr>
-	                      ) : null}
-	                    </Fragment>
-	                  ))}
-	                </tbody>
-	              </table>
+            <div
+              aria-label="请求日志表格"
+              className="virtual-log-table"
+              ref={logScrollRef}
+              role="table"
+              onScroll={(event) => setLogScrollTop(Math.max(0, event.currentTarget.scrollTop - 48))}
+            >
+              <div className="virtual-log-grid virtual-log-header" role="row">
+                <div role="columnheader">时间</div>
+                <div role="columnheader">接口</div>
+                <div role="columnheader">模型</div>
+                <div role="columnheader">状态</div>
+                <div role="columnheader">耗时</div>
+                <div role="columnheader">Tokens</div>
+                <div role="columnheader">输入</div>
+                <div role="columnheader">输出</div>
+                <div role="columnheader">推理</div>
+                <div role="columnheader">错误</div>
+              </div>
+              <div className="virtual-log-spacer" style={{ height: virtualLogWindow.totalHeight }}>
+                {virtualLogWindow.items.map((virtualItem) => {
+                  const item = filteredLogs[virtualItem.index];
+                  const isExpanded = expandedLogId === item.id;
+                  return (
+                    <div
+                      className={`virtual-log-item${isExpanded ? " expanded" : ""}`}
+                      key={item.id}
+                      role="row"
+                      style={{ height: virtualItem.height, transform: `translateY(${virtualItem.top}px)` }}
+                    >
+                      <div
+                        className="virtual-log-grid virtual-log-main"
+                        onClick={() => setExpandedLogId(isExpanded ? null : item.id)}
+                      >
+                        <div role="cell">{new Date(item.timestamp).toLocaleTimeString()}</div>
+                        <div role="cell">{item.path}</div>
+                        <div role="cell">{item.model || "-"}</div>
+                        <div role="cell">
+                          <span className={item.status_code < 400 ? "status-ok" : "status-fail"}>
+                            {item.status_code}
+                          </span>
+                        </div>
+                        <div role="cell">{item.duration_ms}ms</div>
+                        <div role="cell">{item.usage?.total ?? "-"}</div>
+                        <div role="cell">{item.usage?.input ?? "-"}</div>
+                        <div role="cell">{item.usage?.output ?? "-"}</div>
+                        <div role="cell">{item.usage?.reasoning ?? "-"}</div>
+                        <div className="error-cell" role="cell">{item.error || "-"}</div>
+                      </div>
+                      {isExpanded ? (
+                        <div className="log-detail">
+                          <span>request id</span>
+                          <strong>{item.request_id || "-"}</strong>
+                          <span>错误</span>
+                          <strong>{item.error || "-"}</strong>
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </section>
         ) : null}

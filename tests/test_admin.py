@@ -296,7 +296,7 @@ async def test_admin_requests_can_list_all_persisted_entries(tmp_path: Path) -> 
     requests_path = tmp_path / "logs" / "requests.jsonl"
     requests_path.parent.mkdir(parents=True)
     lines = []
-    for index in range(250):
+    for index in range(1200):
         lines.append(
             json.dumps(
                 {
@@ -319,15 +319,21 @@ async def test_admin_requests_can_list_all_persisted_entries(tmp_path: Path) -> 
     app = create_app(config=make_admin_config(tmp_path), codex_client=AdminFakeCodexClient())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         limited = await client.get("/admin/requests")
+        thousand_entries = await client.get("/admin/requests?limit=1000")
+        five_thousand_entries = await client.get("/admin/requests?limit=5000")
         all_entries = await client.get("/admin/requests?limit=all")
 
     # 默认接口仍保持最近窗口；limit=all 返回完整持久化历史，且按新到旧排序。
     assert limited.status_code == 200
+    assert thousand_entries.status_code == 200
+    assert five_thousand_entries.status_code == 200
     assert all_entries.status_code == 200
     assert len(limited.json()["items"]) == 100
+    assert len(thousand_entries.json()["items"]) == 1000
+    assert len(five_thousand_entries.json()["items"]) == 1200
     body = all_entries.json()
-    assert len(body["items"]) == 250
-    assert body["items"][0]["id"] == "req_249"
+    assert len(body["items"]) == 1200
+    assert body["items"][0]["id"] == "req_1199"
     assert body["items"][-1]["id"] == "req_000"
 
 
@@ -370,6 +376,26 @@ async def test_admin_requests_imports_existing_usage_history(tmp_path: Path) -> 
     assert body["items"][0]["status_code"] == 200
     assert body["items"][0]["usage"]["total"] == 9332
     assert "hello" not in json.dumps(body, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_admin_dashboard_returns_aggregated_history_and_rejects_invalid_range(tmp_path: Path) -> None:
+    """验证看板接口只返回聚合结果，并严格校验范围。"""
+    app = create_app(config=make_admin_config(tmp_path), codex_client=AdminFakeCodexClient())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        completion = await client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-5.5", "messages": [{"role": "user", "content": "hello"}]},
+        )
+        dashboard = await client.get("/admin/dashboard?range=all&recent_days=7")
+        invalid = await client.get("/admin/dashboard?range=invalid")
+
+    assert completion.status_code == 200
+    assert dashboard.status_code == 200
+    assert dashboard.json()["requestCount"] == 1
+    assert dashboard.json()["totalTokens"] == 5
+    assert "items" not in dashboard.json()
+    assert invalid.status_code == 400
 
 
 @pytest.mark.asyncio

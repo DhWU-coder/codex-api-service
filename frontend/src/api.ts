@@ -6,6 +6,7 @@ import type {
   ParsedChatStreamEvent,
   RequestLogItem
 } from "./types";
+import type { DashboardRangePreset, DashboardSummary } from "./dashboard";
 
 // 构造本地服务 Bearer 鉴权头；空 key 不发送 Authorization。
 export function buildAuthHeaders(apiKey: string): Record<string, string> {
@@ -130,6 +131,25 @@ export async function fetchRequestLogs(apiKey: string, limit: number | "all" = 1
   }
   const body = (await response.json()) as { items: RequestLogItem[] };
   return body.items;
+}
+
+// 读取后端基于完整持久化历史计算的看板摘要，避免浏览器下载全部日志。
+export async function fetchDashboardSummary(
+  apiKey: string,
+  preset: DashboardRangePreset,
+  recentDays: number
+): Promise<DashboardSummary> {
+  const params = new URLSearchParams({
+    range: preset,
+    recent_days: String(recentDays)
+  });
+  const response = await fetch(`/admin/dashboard?${params.toString()}`, {
+    headers: buildAuthHeaders(apiKey)
+  });
+  if (!response.ok) {
+    throw new Error(`看板读取失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as DashboardSummary;
 }
 
 // 兼容 OpenAI error envelope 和普通 HTTP 状态文本，给 UI 展示更具体的错误。
