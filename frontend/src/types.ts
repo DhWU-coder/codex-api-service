@@ -88,6 +88,41 @@ export type AuthReloadResult = {
   message?: string;
 };
 
+// Codex 账号额度窗口，来自后端脱敏后的 usage 摘要。
+export type CodexUsageWindow = {
+  label: string;
+  kind: "primary" | "secondary";
+  usedPercent: number;
+  remainingPercent: number;
+  limitWindowSeconds: number;
+  resetAfterSeconds: number;
+  resetAt: number;
+};
+
+// 单组 Codex 额度状态，主额度和额外模型额度共用。
+export type CodexUsageRateLimit = {
+  allowed: boolean;
+  limitReached: boolean;
+  windows: CodexUsageWindow[];
+};
+
+// 管理接口返回的 Codex usage 脱敏快照。
+export type CodexUsageSnapshot = {
+  planType: string;
+  rateLimit: CodexUsageRateLimit;
+  additionalRateLimits: Array<{
+    limitName: string;
+    meteredFeature: string;
+    rateLimit: CodexUsageRateLimit;
+  }>;
+  credits: {
+    hasCredits: boolean;
+    unlimited: boolean;
+    overageLimitReached: boolean;
+    balance: string;
+  };
+};
+
 // 请求日志列表中的单条元数据记录。
 export type RequestLogItem = {
   id: string;

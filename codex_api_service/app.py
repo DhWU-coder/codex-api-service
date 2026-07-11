@@ -36,6 +36,7 @@ from .anthropic_compat import (
 )
 from .auth import CodexAuth, credentials_expired_or_near
 from .codex_client import CodexClient, CodexHTTPStatusError, _codex_client_version
+from .codex_usage import CodexUsageFetchError, fetch_codex_usage_snapshot
 from .config import AppConfig, load_config
 from .dashboard_summary import summarize_request_logs
 from .model_catalog import (
@@ -317,6 +318,17 @@ def create_app(
                 },
             )
         return {"oauth": _oauth_status(credentials, reloaded=True)}
+
+    @app.get("/admin/codex/usage")
+    async def admin_codex_usage(request: Request) -> dict[str, Any]:
+        """返回当前 OAuth 账号的 Codex 额度状态。"""
+        _require_local_auth(request, app_config)
+        try:
+            return await fetch_codex_usage_snapshot(client_version=_codex_client_version())
+        except CodexUsageFetchError as error:
+            raise HTTPException(status_code=502, detail="Codex usage status unavailable") from error
+        except Exception as error:
+            raise HTTPException(status_code=502, detail="Codex usage status unavailable") from error
 
     @app.get("/admin/requests")
     async def admin_requests(request: Request, limit: str = "100") -> dict[str, Any]:

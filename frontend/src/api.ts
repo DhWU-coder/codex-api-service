@@ -3,6 +3,7 @@ import type {
   AdminHealth,
   AdminModelCatalog,
   AuthReloadResult,
+  CodexUsageSnapshot,
   ParsedChatStreamEvent,
   RequestLogItem
 } from "./types";
@@ -119,6 +120,17 @@ export async function reloadCodexAuth(apiKey: string): Promise<AuthReloadResult>
     throw new Error(`OAuth 同步失败：${await responseErrorMessage(response)}`);
   }
   return (await response.json()) as AuthReloadResult;
+}
+
+// 读取当前 Codex OAuth 账号的额度状态；OAuth token 只在后端使用。
+export async function fetchCodexUsage(apiKey: string): Promise<CodexUsageSnapshot> {
+  const response = await fetch("/admin/codex/usage", {
+    headers: buildAuthHeaders(apiKey)
+  });
+  if (!response.ok) {
+    throw new Error(`额度状态读取失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as CodexUsageSnapshot;
 }
 
 // 读取 API 请求日志；limit=all 时用于本地看板全量统计。

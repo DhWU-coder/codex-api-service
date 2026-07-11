@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { buildAuthHeaders, fetchAdminModels, fetchDashboardSummary, parseChatStreamLine } from "./api";
+import { buildAuthHeaders, fetchAdminModels, fetchCodexUsage, fetchDashboardSummary, parseChatStreamLine } from "./api";
 
 describe("frontend api helpers", () => {
   it("builds bearer headers only when api key is present", () => {
@@ -83,6 +83,23 @@ describe("frontend api helpers", () => {
     await fetchDashboardSummary("local-secret", "recent", 30);
 
     expect(requests).toEqual(["/admin/dashboard?range=recent&recent_days=30"]);
+    vi.unstubAllGlobals();
+  });
+
+  it("fetches Codex usage status from the local admin endpoint", async () => {
+    // 额度状态必须走本地后端，避免浏览器直接接触 OAuth token。
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        requests.push(String(input));
+        return new Response(JSON.stringify({ planType: "pro" }), { status: 200 });
+      })
+    );
+
+    await fetchCodexUsage("local-secret");
+
+    expect(requests).toEqual(["/admin/codex/usage"]);
     vi.unstubAllGlobals();
   });
 });

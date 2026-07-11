@@ -6,6 +6,7 @@ import {
   Clock3,
   Copy,
   Database,
+  Gauge,
   KeyRound,
   MessageSquare,
   Moon,
@@ -24,6 +25,7 @@ import {
   buildAuthHeaders,
   fetchAdminHealth,
   fetchAdminConfig,
+  fetchCodexUsage,
   fetchDashboardSummary,
   fetchAdminModels,
   fetchRequestLogs,
@@ -54,12 +56,14 @@ import type {
   AdminModelCatalogEntry,
   ChatMessage,
   ChatUsage,
+  CodexUsageRateLimit,
+  CodexUsageSnapshot,
   ModelRequestConfigRow,
   RequestLogItem
 } from "./types";
 
 // 顶部导航标签的枚举，保持状态值简短稳定。
-type ActiveTab = "dashboard" | "chat" | "logs" | "config" | "model-config";
+type ActiveTab = "dashboard" | "chat" | "logs" | "config" | "model-config" | "usage-status";
 
 // 控制台主题只提供明确的浅色和深色两种渲染结果。
 type ThemeMode = "light" | "dark";
@@ -447,6 +451,48 @@ function RequestInsightList({
   );
 }
 
+function formatResetTime(timestamp: number): string {
+  if (!timestamp) {
+    return "-";
+  }
+  return new Date(timestamp * 1000).toLocaleString();
+}
+
+function formatPlanType(planType: string): string {
+  const normalized = planType.trim();
+  if (!normalized) {
+    return "-";
+  }
+  return `${normalized.slice(0, 1).toUpperCase()}${normalized.slice(1).toLowerCase()}`;
+}
+
+function UsageLimitCard({ title, rateLimit }: { title: string; rateLimit: CodexUsageRateLimit }) {
+  return (
+    <section className="codex-limit-card">
+      <div className="codex-limit-card-head">
+        <h3>{title}</h3>
+        <span className={rateLimit.limitReached ? "status-fail" : "status-ok"}>
+          {rateLimit.limitReached ? "已触达" : rateLimit.allowed ? "可用" : "不可用"}
+        </span>
+      </div>
+      <div className="codex-limit-windows">
+        {rateLimit.windows.map((window) => (
+          <div className="codex-limit-window" key={`${title}-${window.kind}`}>
+            <div className="codex-limit-window-head">
+              <span>{window.label} 剩余</span>
+              <strong>{window.remainingPercent}%</strong>
+            </div>
+            <div className="codex-limit-track" aria-hidden="true">
+              <span style={{ width: `${window.remainingPercent}%` }} />
+            </div>
+            <small>重置：{formatResetTime(window.resetAt)}</small>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 // 本地控制台主组件，包含聊天、日志和配置三个工作区。
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("dashboard");
@@ -474,6 +520,9 @@ export function App() {
   const [modelConfigSavedNote, setModelConfigSavedNote] = useState("");
   const [authReloadNote, setAuthReloadNote] = useState("");
   const [isReloadingAuth, setIsReloadingAuth] = useState(false);
+  const [codexUsage, setCodexUsage] = useState<CodexUsageSnapshot | null>(null);
+  const [codexUsageError, setCodexUsageError] = useState("");
+  const [isLoadingCodexUsage, setIsLoadingCodexUsage] = useState(false);
   const [dashboardPreset, setDashboardPreset] = useState<DashboardRangePreset>("today");
   const [dashboardRecentDays, setDashboardRecentDays] = useState(7);
   const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary>(() =>
@@ -575,6 +624,20 @@ export function App() {
       setIsLoadingLogs(false);
     }
   }, [apiKey, requestLogLimit]);
+
+  // 读取当前 OAuth 账号的 Codex 额度状态，失败只影响独立页面。
+  const loadCodexUsage = useCallback(async () => {
+    try {
+      setCodexUsageError("");
+      setIsLoadingCodexUsage(true);
+      const snapshot = await fetchCodexUsage(apiKey);
+      setCodexUsage(snapshot);
+    } catch (caught) {
+      setCodexUsageError(caught instanceof Error ? caught.message : "额度状态读取失败");
+    } finally {
+      setIsLoadingCodexUsage(false);
+    }
+  }, [apiKey]);
 
   // 配置加载成功后，同步默认模型和动态目录到聊天区。
   useEffect(() => {
@@ -979,6 +1042,16 @@ export function App() {
           >
             <SlidersHorizontal size={18} />
             模型配置
+          </button>
+          <button
+            className={activeTab === "usage-status" ? "active" : ""}
+            onClick={() => {
+              setActiveTab("usage-status");
+              void loadCodexUsage();
+            }}
+          >
+            <Gauge size={18} />
+            额度状态
           </button>
         </nav>
 
@@ -1554,6 +1627,63 @@ export function App() {
                 保存模型配置
               </button>
             </div>
+          </section>
+        ) : null}
+
+        {activeTab === "usage-status" ? (
+          <section className="panel" aria-label="额度状态">
+            <header className="toolbar">
+              <div>
+                <h2>额度状态</h2>
+                <p>当前 Codex OAuth 账号的 5h 和 weekly 额度窗口。</p>
+              </div>
+              <button className="secondary-button" onClick={() => void loadCodexUsage()} disabled={isLoadingCodexUsage}>
+                <RefreshCw size={16} />
+                {isLoadingCodexUsage ? "加载中" : "刷新"}
+              </button>
+            </header>
+
+            {codexUsageError ? (
+              <div className="banner error">
+                <AlertTriangle size={18} />
+                {codexUsageError}
+              </div>
+            ) : null}
+
+            {codexUsage ? (
+              <div className="codex-usage-page">
+                <section className="codex-usage-summary">
+                  <div>
+                    <span>账号套餐</span>
+                    <strong>{formatPlanType(codexUsage.planType)}</strong>
+                  </div>
+                  <div>
+                    <span>Credits</span>
+                    <strong>{codexUsage.credits.unlimited ? "无限" : codexUsage.credits.balance}</strong>
+                  </div>
+                  <div>
+                    <span>状态</span>
+                    <strong>{codexUsage.rateLimit.limitReached ? "已触达限制" : "可用"}</strong>
+                  </div>
+                </section>
+
+                <UsageLimitCard title="Codex 主额度" rateLimit={codexUsage.rateLimit} />
+
+                {codexUsage.additionalRateLimits.length ? (
+                  <div className="codex-additional-limits">
+                    {codexUsage.additionalRateLimits.map((item) => (
+                      <UsageLimitCard key={item.limitName} title={item.limitName} rateLimit={item.rateLimit} />
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : !isLoadingCodexUsage ? (
+              <div className="empty-state">
+                <Gauge size={28} />
+                <h3>额度状态未加载</h3>
+                <p>进入页面后会自动读取，也可以点击刷新。</p>
+              </div>
+            ) : null}
           </section>
         ) : null}
       </main>

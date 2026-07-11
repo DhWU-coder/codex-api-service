@@ -242,6 +242,81 @@ async def test_admin_health_reports_expired_oauth_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_admin_codex_usage_returns_safe_limit_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证管理台额度接口返回脱敏后的 Codex usage 摘要。"""
+    config = make_admin_config(tmp_path, api_key="local-secret")
+    write_admin_auth_file(config.auth.auth_path or (tmp_path / "auth.json"), expires=4_102_444_800_000)
+
+    async def fake_fetch_usage(*, client_version: str) -> dict[str, Any]:
+        assert client_version
+        return {
+            "planType": "pro",
+            "rateLimit": {
+                "allowed": True,
+                "limitReached": False,
+                "windows": [
+                    {
+                        "label": "5h",
+                        "kind": "primary",
+                        "usedPercent": 33,
+                        "remainingPercent": 67,
+                        "limitWindowSeconds": 18000,
+                        "resetAfterSeconds": 1200,
+                        "resetAt": 1783814968,
+                    },
+                    {
+                        "label": "Weekly",
+                        "kind": "secondary",
+                        "usedPercent": 21,
+                        "remainingPercent": 79,
+                        "limitWindowSeconds": 604800,
+                        "resetAfterSeconds": 580000,
+                        "resetAt": 1784370805,
+                    },
+                ],
+            },
+            "additionalRateLimits": [],
+            "credits": {"hasCredits": False, "unlimited": False, "overageLimitReached": False, "balance": "0"},
+        }
+
+    monkeypatch.setattr("codex_api_service.app.fetch_codex_usage_snapshot", fake_fetch_usage, raising=False)
+    app = create_app(config=config, codex_client=AdminFakeCodexClient())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        denied = await client.get("/admin/codex/usage")
+        response = await client.get("/admin/codex/usage", headers={"Authorization": "Bearer local-secret"})
+
+    assert denied.status_code == 401
+    assert response.status_code == 200
+    body = response.json()
+    assert body["planType"] == "pro"
+    assert body["rateLimit"]["windows"][0]["remainingPercent"] == 67
+    assert "test-access" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_admin_codex_usage_reports_safe_upstream_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """验证额度接口上游失败时不把敏感内容透传给前端。"""
+    config = make_admin_config(tmp_path, api_key="local-secret")
+    write_admin_auth_file(config.auth.auth_path or (tmp_path / "auth.json"), expires=4_102_444_800_000)
+
+    async def fake_fetch_usage(*, client_version: str) -> dict[str, Any]:
+        raise RuntimeError("upstream failed with test-access")
+
+    monkeypatch.setattr("codex_api_service.app.fetch_codex_usage_snapshot", fake_fetch_usage, raising=False)
+    app = create_app(config=config, codex_client=AdminFakeCodexClient())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/admin/codex/usage", headers={"Authorization": "Bearer local-secret"})
+
+    assert response.status_code == 502
+    serialized = json.dumps(response.json())
+    assert "test-access" not in serialized
+
+
+@pytest.mark.asyncio
 async def test_admin_requests_lists_recent_api_calls(tmp_path: Path) -> None:
     """验证请求日志接口能展示最近 API 调用元数据。"""
     # 先调用一次 chat completion，让服务记录请求日志。

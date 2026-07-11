@@ -60,6 +60,57 @@ const adminModelCatalog = {
   source: "cli"
 };
 
+// 额度状态测试数据模拟 Codex usage backend 返回的脱敏摘要。
+const codexUsageStatus = {
+  planType: "pro",
+  rateLimit: {
+    allowed: true,
+    limitReached: false,
+    windows: [
+      {
+        label: "5h",
+        kind: "primary",
+        usedPercent: 33,
+        remainingPercent: 67,
+        limitWindowSeconds: 18000,
+        resetAfterSeconds: 1200,
+        resetAt: 1783814968
+      },
+      {
+        label: "Weekly",
+        kind: "secondary",
+        usedPercent: 21,
+        remainingPercent: 79,
+        limitWindowSeconds: 604800,
+        resetAfterSeconds: 580000,
+        resetAt: 1784370805
+      }
+    ]
+  },
+  additionalRateLimits: [
+    {
+      limitName: "GPT-5.3-Codex-Spark",
+      meteredFeature: "codex_spark",
+      rateLimit: {
+        allowed: true,
+        limitReached: false,
+        windows: [
+          {
+            label: "5h",
+            kind: "primary",
+            usedPercent: 0,
+            remainingPercent: 100,
+            limitWindowSeconds: 18000,
+            resetAfterSeconds: 18000,
+            resetAt: 1783817589
+          }
+        ]
+      }
+    }
+  ],
+  credits: { hasCredits: false, unlimited: false, overageLimitReached: false, balance: "0" }
+};
+
 // 看板测试用的请求日志，模拟后端 /admin/requests 返回值。
 const requestLogItems = [
   {
@@ -170,6 +221,9 @@ describe("App theme mode", () => {
             return new Response(JSON.stringify({ detail: "catalog unavailable" }), { status: 503 });
           }
           return new Response(JSON.stringify(modelCatalogResponse), { status: 200 });
+        }
+        if (url === "/admin/codex/usage") {
+          return new Response(JSON.stringify(codexUsageStatus), { status: 200 });
         }
         if (url === "/v1/chat/completions") {
           const streamBody =
@@ -377,6 +431,30 @@ describe("App theme mode", () => {
     const effortSelect = (await screen.findByLabelText("gpt-5.5 Effort")) as HTMLSelectElement;
     expect([...effortSelect.options].map((option) => option.value)).toEqual(["medium", "high"]);
     expect(await screen.findByLabelText("gpt-5.6-mini Effort")).toBeTruthy();
+  });
+
+  it("shows Codex usage status in an independent tab under model config", async () => {
+    // 额度状态是模型配置下方的独立导航页，不混进模型配置表单。
+    render(<App />);
+
+    const navButtons = await screen.findAllByRole("button");
+    const modelConfigIndex = navButtons.findIndex((button) => button.textContent === "模型配置");
+    const usageStatusIndex = navButtons.findIndex((button) => button.textContent === "额度状态");
+    expect(modelConfigIndex).toBeGreaterThan(-1);
+    expect(usageStatusIndex).toBe(modelConfigIndex + 1);
+
+    fireEvent.click(screen.getByRole("button", { name: "额度状态" }));
+
+    expect(await screen.findByRole("heading", { name: "额度状态" })).toBeTruthy();
+    expect(await screen.findByText("Pro")).toBeTruthy();
+    expect((await screen.findAllByText("5h 剩余")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("67%")).toBeTruthy();
+    expect((await screen.findAllByText("Weekly 剩余")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("79%")).toBeTruthy();
+    expect(await screen.findByText("GPT-5.3-Codex-Spark")).toBeTruthy();
+    await waitFor(() => {
+      expect(capturedRequests.some((request) => request.url === "/admin/codex/usage")).toBe(true);
+    });
   });
 
   it("keeps only default model on the ordinary config page", async () => {
