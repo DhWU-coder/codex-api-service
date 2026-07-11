@@ -1148,7 +1148,12 @@ export function App() {
                 onChange={(event) => setInput(event.target.value)}
                 placeholder="输入消息..."
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                  // 中文等输入法确认候选词时不能误触发发送。
+                  if (event.nativeEvent.isComposing) {
+                    return;
+                  }
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
                     void sendMessage();
                   }
                 }}

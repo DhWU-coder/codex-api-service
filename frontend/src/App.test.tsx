@@ -293,6 +293,41 @@ describe("App theme mode", () => {
     });
   });
 
+  it("sends a chat message with Enter", async () => {
+    // 普通 Enter 应直接发送当前消息。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "聊天" }));
+    const composer = screen.getByPlaceholderText("输入消息...");
+    fireEvent.change(composer, { target: { value: "enter message" } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(capturedRequests.some((request) => request.url === "/v1/chat/completions")).toBe(true);
+    });
+  });
+
+  it("keeps Shift+Enter for multiline chat input", async () => {
+    // Shift+Enter 只用于换行，不能触发聊天请求。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "聊天" }));
+    const composer = screen.getByPlaceholderText("输入消息...");
+    fireEvent.change(composer, { target: { value: "multiline" } });
+    fireEvent.keyDown(composer, { key: "Enter", shiftKey: true });
+
+    expect(capturedRequests.some((request) => request.url === "/v1/chat/completions")).toBe(false);
+  });
+
+  it("does not send while an input method is composing", async () => {
+    // 中文等输入法确认候选词时，Enter 不能误触发发送。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "聊天" }));
+    const composer = screen.getByPlaceholderText("输入消息...");
+    fireEvent.change(composer, { target: { value: "输入中" } });
+    fireEvent.keyDown(composer, { key: "Enter", isComposing: true });
+
+    expect(capturedRequests.some((request) => request.url === "/v1/chat/completions")).toBe(false);
+  });
+
   it("saves model defaults from the independent model config page", async () => {
     // 独立模型配置页保存完整非默认覆盖映射。
     render(<App />);
