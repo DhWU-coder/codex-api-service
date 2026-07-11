@@ -18,6 +18,7 @@ http://127.0.0.1:1219/v1
 - `GET /anthropic/v1/models`
 - `GET /ui` 本地控制台
 - `GET /admin/health` 控制台运行状态
+- `GET /admin/models` 控制台模型目录
 - 非流式和 `stream: true` 流式 SSE
 - 成功响应后写入 `.codex-usage/usage.jsonl`
 
@@ -110,6 +111,7 @@ Codex API Service starting
 ```bash
 curl http://127.0.0.1:1219/health
 curl http://127.0.0.1:1219/v1/models
+curl http://127.0.0.1:1219/admin/models
 ```
 
 启动前查看有效配置，输出不会包含密钥：
@@ -235,7 +237,7 @@ http://127.0.0.1:1219/ui
 
 - 聊天：直接用本服务的 `/v1/chat/completions` 流式聊天。
 - 请求日志：查看最近请求的接口、模型、状态、耗时和 token 用量，支持筛选和展开详情。
-- 配置：编辑常用 `config.yaml` 字段；模型、reasoning、fast、usage 和 API key 可立即生效。
+- 配置：编辑常用 `config.yaml` 字段；模型和 reasoning effort 会从 Codex CLI 动态目录下拉选择，fast、usage 和 API key 可立即生效。
 - 状态条：展示 OAuth、Fast、usage 写入和 Codex CLI 版本状态。
 
 聊天区支持 Markdown fenced code block 展示和代码块复制。
@@ -340,10 +342,10 @@ Responses tool choice。模型返回 function call 时，非流式响应会输�
 有些网关会在 provider base URL 后硬拼 `/v1/models` 做连接测试；请把 base URL 填成
 `http://127.0.0.1:1219/anthropic`，不要填到 `/anthropic/messages`。它会命中
 `/anthropic/v1/models`。该接口返回 Anthropic-native 模型列表格式；为了通过 Claude-3p
-对模型名的 Anthropic family 过滤，模型 id 会使用 `claude-sonnet-...` 发现别名，例如
-`claude-sonnet-5-5`，并带上 `anthropic_family_tier="sonnet"`。`display_name` 保持
-`config.yaml` 里的原始值，例如 `gpt-5.5`。请求 `/anthropic/messages` 时，这个发现别名、
-旧版 `claude-gpt-...` 别名以及裸 `sonnet` tier 都会自动映射回真实 Codex 模型名。
+对模型名的 Anthropic family 过滤，模型 id 和 `display_name` 都会使用不含 `gpt`、`codex`
+或 `openai` 的 `claude-sonnet-...` 发现别名，例如 `claude-sonnet-5-5`，并带上
+`anthropic_family_tier="sonnet"`。请求 `/anthropic/messages` 时，这个发现别名、旧版
+`claude-gpt-...` 别名以及裸 `sonnet` tier 都会自动映射回真实 Codex 模型名。
 Claude-3p 网关推理会把 base URL 拼成 `/anthropic/v1/messages`，该路径也会走同一套映射。
 
 图片输入支持 Anthropic `image` content block：

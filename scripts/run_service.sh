@@ -9,6 +9,14 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VENV_PYTHON="${PROJECT_ROOT}/.venv/bin/python"
 VENV_SITE_PACKAGES=""
 
+# launchd 的默认 PATH 很短，补充 Homebrew 常见目录以便找到 Codex CLI 和 Node。
+for CLI_BIN_DIR in /opt/homebrew/bin /usr/local/bin; do
+  if [[ -d "${CLI_BIN_DIR}" ]]; then
+    PATH="${CLI_BIN_DIR}:${PATH}"
+  fi
+done
+export PATH
+
 # 切到项目根目录，服务会默认读取这里的 config.yaml。
 cd "${PROJECT_ROOT}"
 

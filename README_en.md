@@ -19,6 +19,7 @@ Supported endpoints and features:
 - `GET /anthropic/v1/models`
 - `GET /ui` local console
 - `GET /admin/health` console runtime status
+- `GET /admin/models` console model catalog
 - Non-streaming responses and `stream: true` SSE streaming
 - Successful requests can be written to `.codex-usage/usage.jsonl`
 
@@ -118,6 +119,7 @@ Check the service from another terminal:
 ```bash
 curl http://127.0.0.1:1219/health
 curl http://127.0.0.1:1219/v1/models
+curl http://127.0.0.1:1219/admin/models
 ```
 
 Print the effective configuration without secrets:
@@ -243,7 +245,7 @@ The console includes three pages:
 
 - Chat: stream chat directly through `/v1/chat/completions`.
 - Request logs: inspect recent endpoints, models, status codes, latency, and token usage, with filtering and expandable details.
-- Configuration: edit common `config.yaml` fields. Model, reasoning, fast mode, usage logging, and API key changes apply immediately.
+- Configuration: edit common `config.yaml` fields. Model and reasoning effort choices come from the dynamic Codex CLI catalog; fast mode, usage logging, and API key changes apply immediately.
 - Status strip: show OAuth, Fast, usage logging, and Codex CLI version status.
 
 The chat page supports Markdown fenced code blocks and per-block copy actions.
@@ -350,12 +352,12 @@ Some gateways append `/v1/models` to the provider base URL during connection
 tests. Use `http://127.0.0.1:1219/anthropic` as the base URL so discovery reaches
 `/anthropic/v1/models`; do not set the base URL to `/anthropic/messages`. This
 endpoint returns the Anthropic-native model list shape. To pass Claude-3p's
-Anthropic-family model-name filter, model IDs use a `claude-sonnet-...`
-discovery alias, such as `claude-sonnet-5-5`, and include
-`anthropic_family_tier="sonnet"`. `display_name` keeps the original
-`config.yaml` model name, such as `gpt-5.5`. Requests to `/anthropic/messages`
-map that discovery alias, old `claude-gpt-...` aliases, and the bare `sonnet`
-tier back to the real Codex model name automatically.
+Anthropic-family model-name filter, model IDs and `display_name` use a
+`claude-sonnet-...` discovery alias that does not contain `gpt`, `codex`, or
+`openai`, such as `claude-sonnet-5-5`, and include
+`anthropic_family_tier="sonnet"`. Requests to `/anthropic/messages` map that
+discovery alias, old `claude-gpt-...` aliases, and the bare `sonnet` tier back
+to the real Codex model name automatically.
 Claude-3p gateway inference appends `/v1/messages` to the base URL, so
 `/anthropic/v1/messages` uses the same mapping.
 

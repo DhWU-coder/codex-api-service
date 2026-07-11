@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { buildAuthHeaders, parseChatStreamLine } from "./api";
+import { buildAuthHeaders, fetchAdminModels, parseChatStreamLine } from "./api";
 
 describe("frontend api helpers", () => {
   it("builds bearer headers only when api key is present", () => {
@@ -41,5 +41,31 @@ describe("frontend api helpers", () => {
       message: "The model requires a newer version of Codex.",
       statusCode: 400
     });
+  });
+
+  it("fetches admin model catalog with optional force refresh", async () => {
+    // 模型目录刷新按钮需要透传 refresh=true，普通加载则不要强刷 CLI。
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        requests.push(String(input));
+        return new Response(
+          JSON.stringify({
+            models: [],
+            effective_default_model: "",
+            cache_state: "fresh",
+            source: "cli"
+          }),
+          { status: 200 }
+        );
+      })
+    );
+
+    await fetchAdminModels("local-secret");
+    await fetchAdminModels("local-secret", true);
+
+    expect(requests).toEqual(["/admin/models", "/admin/models?refresh=true"]);
+    vi.unstubAllGlobals();
   });
 });

@@ -37,6 +37,14 @@ from .anthropic_compat import (
 from .auth import CodexAuth, credentials_expired_or_near
 from .codex_client import CodexClient, CodexHTTPStatusError, _codex_client_version
 from .config import AppConfig, load_config
+from .model_catalog import (
+    CodexModelCatalog,
+    ModelCatalogSnapshot,
+    anthropic_model_list_response,
+    build_anthropic_aliases,
+    model_from_anthropic_alias,
+    model_list_response,
+)
 from .openai_compat import (
     build_chat_completion,
     build_chat_delta_sse,
@@ -57,7 +65,13 @@ from .usage_log import UsageLogger
 CODEX_FAST_SERVICE_TIER = "priority"
 
 
-def create_app(*, config: AppConfig | None = None, codex_client: Any | None = None) -> FastAPI:
+def create_app(
+    *,
+    config: AppConfig | None = None,
+    codex_client: Any | None = None,
+    model_catalog: Any | None = None,
+    model_catalog_runner: Any | None = None,
+) -> FastAPI:
     """创建 FastAPI 应用，测试可注入 fake Codex client。"""
     # 未显式传入配置时，从当前项目根目录加载 config.yaml。
     app_config = config or load_config()
@@ -71,6 +85,7 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
         path=app_config.project_root / "logs" / "requests.jsonl",
         usage_path=app_config.usage.path,
     )
+    catalog = model_catalog or CodexModelCatalog(config_getter=lambda: app_config, runner=model_catalog_runner)
     app = FastAPI(title="Codex OpenAI API Service", version="0.1.0")
 
     @app.exception_handler(HTTPException)
@@ -89,7 +104,9 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
         """返回 OpenAI-compatible 模型列表。"""
         _require_local_auth(request, app_config)
         started = time.perf_counter()
-        response_body = _model_list_response(app_config)
+        snapshot = await catalog.snapshot()
+        _require_model_catalog(snapshot)
+        response_body = model_list_response(snapshot)
         request_log.record(
             method="GET",
             path="/v1/models",
@@ -104,7 +121,9 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
         """返回 Anthropic 网关模型发现所需的模型列表。"""
         _require_local_auth(request, app_config)
         started = time.perf_counter()
-        response_body = _anthropic_model_list_response(app_config)
+        snapshot = await catalog.snapshot()
+        _require_model_catalog(snapshot)
+        response_body = anthropic_model_list_response(snapshot)
         request_log.record(
             method="GET",
             path="/anthropic/v1/models",
@@ -198,8 +217,8 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
         started = time.perf_counter()
         path = request.url.path
         body = await request.json()
-        requested_model = str(body.get("model") or _anthropic_model_alias(app_config.codex.default_model))
-        codex_model = _codex_model_from_anthropic_alias(requested_model, app_config)
+        snapshot = await catalog.snapshot()
+        requested_model, codex_model = _anthropic_requested_and_codex_model(body.get("model"), snapshot, app_config)
         payload = _anthropic_body_to_codex_payload(body, app_config, codex_model)
         if bool(body.get("stream")):
             return StreamingResponse(
@@ -236,6 +255,14 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
         """返回控制台安全配置快照。"""
         _require_local_auth(request, app_config)
         return safe_config_snapshot(app_config)
+
+    @app.get("/admin/models")
+    async def admin_models(request: Request, refresh: bool = False) -> dict[str, Any]:
+        """返回控制台模型选择器使用的动态模型目录。"""
+        _require_local_auth(request, app_config)
+        snapshot = await catalog.snapshot(refresh=refresh)
+        _require_model_catalog(snapshot)
+        return _admin_model_catalog_response(snapshot)
 
     @app.patch("/admin/config")
     async def admin_config_patch(request: Request) -> dict[str, Any]:
@@ -315,7 +342,54 @@ def create_app(*, config: AppConfig | None = None, codex_client: Any | None = No
     app.state.codex_client = client
     app.state.usage_logger = usage_logger
     app.state.request_log = request_log
+    app.state.model_catalog = catalog
     return app
+
+
+def _require_model_catalog(snapshot: ModelCatalogSnapshot) -> None:
+    """模型目录为空时返回统一 503，避免客户端拿到空选择器。"""
+    if snapshot.models:
+        return
+    raise HTTPException(status_code=503, detail="No Codex models available")
+
+
+def _admin_model_catalog_response(snapshot: ModelCatalogSnapshot) -> dict[str, Any]:
+    """把内部模型目录快照转换成控制台 API 响应。"""
+    body: dict[str, Any] = {
+        "models": [
+            {
+                "id": entry.id,
+                "display_name": entry.display_name,
+                "default_reasoning_effort": entry.default_reasoning_effort,
+                "supported_reasoning_efforts": list(entry.supported_reasoning_efforts),
+                "source": entry.source,
+            }
+            for entry in snapshot.models
+        ],
+        "effective_default_model": snapshot.effective_default_model,
+        "source": snapshot.source,
+        "cache_state": snapshot.cache_state,
+    }
+    if snapshot.warning:
+        body["warning"] = snapshot.warning
+    return body
+
+
+def _anthropic_requested_and_codex_model(
+    requested_model_value: Any,
+    snapshot: ModelCatalogSnapshot,
+    config: AppConfig,
+) -> tuple[str, str]:
+    """解析 Anthropic 请求模型名，同时保留响应里的公开模型名。"""
+    if requested_model_value:
+        requested_model = str(requested_model_value)
+        return requested_model, model_from_anthropic_alias(requested_model, snapshot)
+    if snapshot.models:
+        aliases = build_anthropic_aliases(snapshot)
+        default_alias = aliases.public_by_real.get(snapshot.effective_default_model)
+        requested_model = default_alias or aliases.public_by_real[snapshot.models[0].id]
+        return requested_model, model_from_anthropic_alias(requested_model, snapshot)
+    return "sonnet", config.codex.default_model
 
 
 def _require_local_auth(request: Request, config: AppConfig) -> None:
@@ -438,86 +512,6 @@ def _request_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on", "fast"}
     return bool(value)
-
-
-def _model_list_response(config: AppConfig) -> dict[str, Any]:
-    """构造本地模型发现响应。"""
-    created = int(time.time())
-    return {
-        "object": "list",
-        "data": [
-            {"id": model, "object": "model", "created": created, "owned_by": "codex-oauth"}
-            for model in config.codex.available_models
-        ],
-    }
-
-
-def _anthropic_model_list_response(config: AppConfig) -> dict[str, Any]:
-    """构造 Anthropic-native 模型发现响应。"""
-    created_at = "2026-07-02T00:00:00Z"
-    models = []
-    for index, model in enumerate(config.codex.available_models):
-        is_default = model == config.codex.default_model or index == 0 and config.codex.default_model not in config.codex.available_models
-        models.append(
-            {
-                "type": "model",
-                "id": _anthropic_model_alias(model),
-                "display_name": model,
-                "created_at": created_at,
-                "anthropic_family_tier": "sonnet",
-                "is_family_default": is_default,
-            }
-        )
-    first_id = models[0]["id"] if models else None
-    last_id = models[-1]["id"] if models else None
-    return {"data": models, "has_more": False, "first_id": first_id, "last_id": last_id}
-
-
-def _anthropic_model_alias(model: str) -> str:
-    """生成能通过 Claude-3p 过滤规则的模型发现别名。"""
-    if _looks_like_claude_model(model):
-        return model
-    normalized = _slug_model_name(model)
-    if normalized.startswith("gpt-"):
-        normalized = normalized.removeprefix("gpt-")
-    if normalized.startswith("codex-"):
-        normalized = normalized.removeprefix("codex-")
-    return f"claude-sonnet-{normalized or 'model'}"
-
-
-def _legacy_anthropic_model_alias(model: str) -> str:
-    """生成旧版本使用过的 claude-gpt 风格别名，用于兼容已保存配置。"""
-    if model.startswith(("claude", "anthropic")):
-        return model
-    return f"claude-{_slug_model_name(model) or 'model'}"
-
-
-def _slug_model_name(model: str) -> str:
-    """把模型名规范化成短横线分隔的可读片段。"""
-    normalized = "".join(char.lower() if char.isalnum() else "-" for char in model).strip("-")
-    while "--" in normalized:
-        normalized = normalized.replace("--", "-")
-    return normalized
-
-
-def _looks_like_claude_model(model: str) -> bool:
-    """判断模型名是否已经像 Claude 模型，避免重复改写真实 Claude ID。"""
-    lowered = model.lower()
-    blocked_words = {"gpt", "codex", "openai"}
-    parts = set(_slug_model_name(lowered).split("-"))
-    return lowered.startswith(("anthropic", "claude")) and not blocked_words.intersection(parts)
-
-
-def _codex_model_from_anthropic_alias(model: str, config: AppConfig) -> str:
-    """把 Anthropic 模型发现别名映射回真实 Codex 模型名。"""
-    model_map = {real_model: real_model for real_model in config.codex.available_models}
-    model_map.update({_anthropic_model_alias(real_model): real_model for real_model in config.codex.available_models})
-    model_map.update({_legacy_anthropic_model_alias(real_model): real_model for real_model in config.codex.available_models})
-    if config.codex.default_model in config.codex.available_models:
-        model_map.setdefault("sonnet", config.codex.default_model)
-    elif config.codex.available_models:
-        model_map.setdefault("sonnet", config.codex.available_models[0])
-    return model_map.get(model, model)
 
 
 async def _stream_chat_completion(

@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from codex_api_service.app import create_app
 from codex_api_service.codex_client import CodexHTTPStatusError, CodexUnexpectedResponseError
 from codex_api_service.config import AppConfig, ApiConfig, AuthConfig, CodexConfig, ServerConfig, UsageConfig
+from codex_api_service.model_catalog import ModelCatalogEntry, ModelCatalogSnapshot
 
 
 class FakeCodexClient:
@@ -114,6 +115,40 @@ class FailingCreateCodexClient:
         yield {}
 
 
+class FakeModelCatalog:
+    """为模型发现路由提供可控目录快照。"""
+
+    def __init__(self, snapshot: ModelCatalogSnapshot) -> None:
+        """记录 refresh 参数，方便断言强制刷新语义。"""
+        self.snapshot_value = snapshot
+        self.refreshes: list[bool] = []
+
+    async def snapshot(self, *, refresh: bool = False) -> ModelCatalogSnapshot:
+        """返回固定快照，不访问真实 Codex CLI。"""
+        self.refreshes.append(refresh)
+        return self.snapshot_value
+
+
+def model_snapshot(*models: str, default_model: str | None = None) -> ModelCatalogSnapshot:
+    """构造模型发现测试用快照。"""
+    entries = tuple(
+        ModelCatalogEntry(
+            id=model,
+            display_name=model,
+            default_reasoning_effort="medium",
+            supported_reasoning_efforts=("low", "medium", "high"),
+            order=index,
+        )
+        for index, model in enumerate(models)
+    )
+    return ModelCatalogSnapshot(
+        models=entries,
+        effective_default_model=default_model or (models[0] if models else ""),
+        source="cli",
+        cache_state="fresh",
+    )
+
+
 def make_test_config(tmp_path: Path, api_key: str | None = None) -> AppConfig:
     """构造测试配置，确保日志写入临时目录。"""
     return AppConfig(
@@ -158,18 +193,61 @@ def write_oauth_file(path: Path, *, access: str, refresh: str, expires: int) -> 
 async def test_models_route_returns_openai_list_shape(tmp_path: Path) -> None:
     """验证 /v1/models 返回 OpenAI list 结构。"""
     # 使用 fake client 创建应用，避免真实 Codex 依赖。
-    app = create_app(config=make_test_config(tmp_path), codex_client=FakeCodexClient())
+    app = create_app(
+        config=make_test_config(tmp_path),
+        codex_client=FakeCodexClient(),
+        model_catalog=FakeModelCatalog(model_snapshot("gpt-5.6-sol", "gpt-5.6-mini")),
+    )
 
     # 通过 ASGITransport 直接调用应用，不启动真实端口。
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/v1/models")
 
-    # 模型列表至少包含默认模型。
+    # 模型列表来自动态目录，而不是静态 available_models。
     assert response.status_code == 200
     body = response.json()
     assert body["object"] == "list"
-    assert body["data"][0]["id"] == "gpt-5.5"
+    assert [item["id"] for item in body["data"]] == ["gpt-5.6-sol", "gpt-5.6-mini"]
     assert body["data"][0]["object"] == "model"
+
+
+@pytest.mark.asyncio
+async def test_admin_models_route_returns_catalog_and_honors_refresh(tmp_path: Path) -> None:
+    """验证 /admin/models 返回动态目录，并透传 refresh=true。"""
+    catalog = FakeModelCatalog(model_snapshot("gpt-5.6-sol", default_model="gpt-5.6-sol"))
+    app = create_app(config=make_test_config(tmp_path, api_key="local-secret"), codex_client=FakeCodexClient(), model_catalog=catalog)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        denied = await client.get("/admin/models")
+        allowed = await client.get("/admin/models?refresh=true", headers={"Authorization": "Bearer local-secret"})
+
+    assert denied.status_code == 401
+    assert allowed.status_code == 200
+    body = allowed.json()
+    assert catalog.refreshes == [True]
+    assert body["effective_default_model"] == "gpt-5.6-sol"
+    assert body["cache_state"] == "fresh"
+    assert body["models"][0]["id"] == "gpt-5.6-sol"
+    assert body["models"][0]["supported_reasoning_efforts"] == ["low", "medium", "high"]
+
+
+@pytest.mark.asyncio
+async def test_model_discovery_routes_return_503_when_catalog_empty(tmp_path: Path) -> None:
+    """验证所有模型发现接口在目录为空时返回 503。"""
+    app = create_app(
+        config=make_test_config(tmp_path),
+        codex_client=FakeCodexClient(),
+        model_catalog=FakeModelCatalog(model_snapshot()),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        admin_response = await client.get("/admin/models")
+        openai_response = await client.get("/v1/models")
+        anthropic_response = await client.get("/anthropic/v1/models")
+
+    assert admin_response.status_code == 503
+    assert openai_response.status_code == 503
+    assert anthropic_response.status_code == 503
 
 
 @pytest.mark.asyncio
@@ -242,21 +320,25 @@ async def test_anthropic_messages_route_maps_discovery_alias_to_real_model(tmp_p
     """验证 Anthropic 发现别名会映射回真实 Codex 模型。"""
     # 网关发现别名必须通过 Claude 的 Anthropic 模型过滤，但发给 Codex backend 的模型名仍必须是原始值。
     fake_client = FakeCodexClient()
-    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+    app = create_app(
+        config=make_test_config(tmp_path),
+        codex_client=fake_client,
+        model_catalog=FakeModelCatalog(model_snapshot("gpt-5.6-sol")),
+    )
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/anthropic/messages",
             json={
-                "model": "claude-sonnet-5-5",
+                "model": "claude-sonnet-5-6-sol",
                 "max_tokens": 128,
                 "messages": [{"role": "user", "content": "hello"}],
             },
         )
 
     assert response.status_code == 200
-    assert fake_client.payloads[0]["model"] == "gpt-5.5"
-    assert response.json()["model"] == "claude-sonnet-5-5"
+    assert fake_client.payloads[0]["model"] == "gpt-5.6-sol"
+    assert response.json()["model"] == "claude-sonnet-5-6-sol"
 
 
 @pytest.mark.asyncio
@@ -264,21 +346,25 @@ async def test_anthropic_v1_messages_route_matches_gateway_inference_path(tmp_pa
     """验证 Claude-3p 网关硬拼的 /v1/messages 推理路径可用。"""
     # Claude-3p 使用 base URL + /v1/messages，因此 /anthropic base URL 需要这个兼容入口。
     fake_client = FakeCodexClient()
-    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+    app = create_app(
+        config=make_test_config(tmp_path),
+        codex_client=fake_client,
+        model_catalog=FakeModelCatalog(model_snapshot("gpt-5.6-sol")),
+    )
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/anthropic/v1/messages",
             json={
-                "model": "claude-sonnet-5-5",
+                "model": "claude-sonnet-5-6-sol",
                 "max_tokens": 128,
                 "messages": [{"role": "user", "content": "hello"}],
             },
         )
 
     assert response.status_code == 200
-    assert fake_client.payloads[0]["model"] == "gpt-5.5"
-    assert response.json()["model"] == "claude-sonnet-5-5"
+    assert fake_client.payloads[0]["model"] == "gpt-5.6-sol"
+    assert response.json()["model"] == "claude-sonnet-5-6-sol"
 
 
 @pytest.mark.asyncio
@@ -286,10 +372,14 @@ async def test_anthropic_messages_route_maps_legacy_and_tier_aliases_to_real_mod
     """验证旧发现别名和裸 tier 别名也会映射回真实 Codex 模型。"""
     # 兼容用户已经保存过的旧模型名，同时支持 Claude 可能直接提交的 sonnet tier。
     fake_client = FakeCodexClient()
-    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+    app = create_app(
+        config=make_test_config(tmp_path),
+        codex_client=fake_client,
+        model_catalog=FakeModelCatalog(model_snapshot("gpt-5.6-sol")),
+    )
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        for model in ("claude-gpt-5-5", "sonnet"):
+        for model in ("claude-gpt-5-6-sol", "sonnet"):
             response = await client.post(
                 "/anthropic/messages",
                 json={
@@ -301,7 +391,7 @@ async def test_anthropic_messages_route_maps_legacy_and_tier_aliases_to_real_mod
 
             assert response.status_code == 200
 
-    assert [payload["model"] for payload in fake_client.payloads] == ["gpt-5.5", "gpt-5.5"]
+    assert [payload["model"] for payload in fake_client.payloads] == ["gpt-5.6-sol", "gpt-5.6-sol"]
 
 
 @pytest.mark.asyncio
@@ -415,19 +505,26 @@ async def test_anthropic_messages_route_streams_tool_use_events(tmp_path: Path) 
 async def test_anthropic_model_discovery_route_returns_model_list(tmp_path: Path) -> None:
     """验证 /anthropic/v1/models 兼容会硬拼 /v1/models 的网关探测。"""
     # Claude-3p 会过滤包含 gpt/codex 的模型名，因此发现别名必须像 Anthropic tier 模型。
-    app = create_app(config=make_test_config(tmp_path, api_key="local-secret"), codex_client=FakeCodexClient())
+    app = create_app(
+        config=make_test_config(tmp_path, api_key="local-secret"),
+        codex_client=FakeCodexClient(),
+        model_catalog=FakeModelCatalog(model_snapshot("gpt-5.6-sol", "codex-5.6-sol")),
+    )
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/anthropic/v1/models", headers={"x-api-key": "local-secret"})
 
     assert response.status_code == 200
     body = response.json()
+    serialized = json.dumps(body).lower()
     assert body["has_more"] is False
-    assert body["first_id"] == "claude-sonnet-5-5"
-    assert body["last_id"] == "claude-sonnet-5-5"
-    assert body["data"][0]["id"] == "claude-sonnet-5-5"
+    assert "gpt" not in serialized
+    assert "codex" not in serialized
+    assert body["first_id"] == "claude-sonnet-5-6-sol"
+    assert body["last_id"] == "claude-sonnet-5-6-sol-2"
+    assert body["data"][0]["id"] == "claude-sonnet-5-6-sol"
     assert body["data"][0]["type"] == "model"
-    assert body["data"][0]["display_name"] == "gpt-5.5"
+    assert body["data"][0]["display_name"] == "claude-sonnet-5-6-sol"
     assert body["data"][0]["anthropic_family_tier"] == "sonnet"
     assert body["data"][0]["is_family_default"] is True
     assert body["data"][0]["created_at"].endswith("Z")

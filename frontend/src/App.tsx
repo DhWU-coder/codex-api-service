@@ -23,6 +23,7 @@ import {
   buildAuthHeaders,
   fetchAdminHealth,
   fetchAdminConfig,
+  fetchAdminModels,
   fetchRequestLogs,
   parseChatStreamLine,
   reloadCodexAuth,
@@ -37,7 +38,15 @@ import {
   type DashboardRangePreset,
   type DashboardTimelineBucket
 } from "./dashboard";
-import type { AdminConfig, AdminHealth, ChatMessage, ChatUsage, RequestLogItem } from "./types";
+import type {
+  AdminConfig,
+  AdminHealth,
+  AdminModelCatalog,
+  AdminModelCatalogEntry,
+  ChatMessage,
+  ChatUsage,
+  RequestLogItem
+} from "./types";
 
 // 顶部导航标签的枚举，保持状态值简短稳定。
 type ActiveTab = "dashboard" | "chat" | "logs" | "config";
@@ -50,6 +59,9 @@ const THEME_STORAGE_KEY = "codex-console-theme";
 
 // 本地控制台默认读取全部持久化请求日志，让看板和日志页统计口径一致。
 const REQUEST_LOG_LIMIT = "all";
+
+// 没有目录元数据时保留旧四档，保证配置兜底仍可编辑。
+const DEFAULT_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"];
 
 // API Service 用量看板支持的时间范围，顺序和页面分段控件一致。
 const DASHBOARD_RANGE_OPTIONS: Array<{ value: DashboardRangePreset; label: string }> = [
@@ -89,6 +101,58 @@ function formFromConfig(config: AdminConfig): ConfigFormState {
     authPath: config.auth.auth_path,
     importAuthPath: config.auth.import_auth_path
   };
+}
+
+// 为配置兜底模型构造最小目录项，避免目录接口失败时丢失当前模型。
+function fallbackModelEntry(modelId: string, defaultEffort: string): AdminModelCatalogEntry {
+  return {
+    id: modelId,
+    display_name: modelId,
+    default_reasoning_effort: defaultEffort || "medium",
+    supported_reasoning_efforts: DEFAULT_REASONING_EFFORTS,
+    source: "config"
+  };
+}
+
+// 按 id 去重合并模型项，目录项优先，当前值作为最后兜底。
+function buildModelOptions(
+  catalog: AdminModelCatalog | null,
+  config: AdminConfig | null,
+  selectedModels: string[],
+  defaultEffort: string
+): AdminModelCatalogEntry[] {
+  const entries = catalog?.models.length
+    ? catalog.models
+    : (config?.codex.available_models || []).map((modelId) => fallbackModelEntry(modelId, defaultEffort));
+  const merged = new Map<string, AdminModelCatalogEntry>();
+  for (const entry of entries) {
+    if (entry.id.trim()) {
+      merged.set(entry.id, entry);
+    }
+  }
+  for (const modelId of selectedModels) {
+    if (modelId.trim() && !merged.has(modelId)) {
+      merged.set(modelId, fallbackModelEntry(modelId, defaultEffort));
+    }
+  }
+  return [...merged.values()];
+}
+
+function modelEntry(options: AdminModelCatalogEntry[], modelId: string): AdminModelCatalogEntry | undefined {
+  return options.find((entry) => entry.id === modelId);
+}
+
+function reasoningOptionsFor(options: AdminModelCatalogEntry[], modelId: string): string[] {
+  const supported = modelEntry(options, modelId)?.supported_reasoning_efforts.filter(Boolean);
+  return supported?.length ? supported : DEFAULT_REASONING_EFFORTS;
+}
+
+function effortForModel(options: AdminModelCatalogEntry[], modelId: string, currentEffort: string): string {
+  const supported = reasoningOptionsFor(options, modelId);
+  if (supported.includes(currentEffort)) {
+    return currentEffort;
+  }
+  return modelEntry(options, modelId)?.default_reasoning_effort || supported[0] || "medium";
 }
 
 // 判断 localStorage 里的主题值是否是当前版本支持的值。
@@ -399,6 +463,8 @@ export function App() {
   const [healthError, setHealthError] = useState("");
   const [config, setConfig] = useState<AdminConfig | null>(null);
   const [configForm, setConfigForm] = useState<ConfigFormState | null>(null);
+  const [modelCatalog, setModelCatalog] = useState<AdminModelCatalog | null>(null);
+  const [modelCatalogError, setModelCatalogError] = useState("");
   const [configSavedNote, setConfigSavedNote] = useState("");
   const [authReloadNote, setAuthReloadNote] = useState("");
   const [isReloadingAuth, setIsReloadingAuth] = useState(false);
@@ -431,11 +497,6 @@ export function App() {
     localStorage.setItem("codex-console-api-key", apiKey);
   }, [apiKey]);
 
-  // 配置加载成功后，同步默认模型和 reasoning effort 到聊天区。
-  useEffect(() => {
-    void loadConfig();
-  }, []);
-
   // 当前日志统计摘要，驱动看板和日志页顶部信息。
   const dashboardSummary = useMemo(
     () => summarizeRequestLogs(logs, { preset: dashboardPreset, recentDays: dashboardRecentDays }),
@@ -456,6 +517,21 @@ export function App() {
       setError(caught instanceof Error ? caught.message : "配置读取失败");
     }
   }, [apiKey]);
+
+  // 读取动态模型目录，供聊天页和配置页共享模型/effort 选择。
+  const loadModelCatalog = useCallback(
+    async (force = false) => {
+      try {
+        setModelCatalogError("");
+        const loaded = await fetchAdminModels(apiKey, force);
+        setModelCatalog(loaded);
+      } catch (caught) {
+        setModelCatalog(null);
+        setModelCatalogError(caught instanceof Error ? caught.message : "模型目录读取失败");
+      }
+    },
+    [apiKey]
+  );
 
   // 读取运行健康状态，驱动侧栏状态条。
   const loadHealth = useCallback(async () => {
@@ -479,6 +555,12 @@ export function App() {
       setError(caught instanceof Error ? caught.message : "请求日志读取失败");
     }
   }, [apiKey]);
+
+  // 配置加载成功后，同步默认模型、effort 和动态目录到聊天区。
+  useEffect(() => {
+    void loadConfig();
+    void loadModelCatalog();
+  }, [loadConfig, loadModelCatalog]);
 
   // 看板是默认首页，启动时主动加载最近请求日志。
   useEffect(() => {
@@ -653,10 +735,11 @@ export function App() {
       setConfigForm({ ...configForm, localApiKey: "", localApiKeyTouched: false });
       void loadConfig();
       void loadHealth();
+      void loadModelCatalog();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "配置保存失败");
     }
-  }, [apiKey, configForm, loadConfig, loadHealth]);
+  }, [apiKey, configForm, loadConfig, loadHealth, loadModelCatalog]);
 
   // 从 Codex CLI/App 的登录文件同步 OAuth 凭据，解决本服务缓存旧 token 的场景。
   const reloadAuth = useCallback(async () => {
@@ -695,6 +778,65 @@ export function App() {
     () => runtimeStatusView(health, fastMode, healthError),
     [fastMode, health, healthError]
   );
+
+  const modelOptions = useMemo(
+    () =>
+      buildModelOptions(
+        modelCatalog,
+        config,
+        [model, configForm?.defaultModel || ""],
+        configForm?.reasoningEffort || reasoningEffort
+      ),
+    [config, configForm?.defaultModel, configForm?.reasoningEffort, model, modelCatalog, reasoningEffort]
+  );
+  const chatReasoningOptions = useMemo(() => reasoningOptionsFor(modelOptions, model), [model, modelOptions]);
+  const configReasoningOptions = useMemo(
+    () => reasoningOptionsFor(modelOptions, configForm?.defaultModel || model),
+    [configForm?.defaultModel, model, modelOptions]
+  );
+
+  // 目录刷新后，如果当前 effort 不再被所选模型支持，自动切到该模型默认值。
+  useEffect(() => {
+    setReasoningEffort((current) => effortForModel(modelOptions, model, current));
+  }, [model, modelOptions]);
+
+  useEffect(() => {
+    setConfigForm((current) => {
+      if (!current) {
+        return current;
+      }
+      const nextEffort = effortForModel(modelOptions, current.defaultModel, current.reasoningEffort);
+      return nextEffort === current.reasoningEffort ? current : { ...current, reasoningEffort: nextEffort };
+    });
+  }, [modelOptions]);
+
+  const updateChatModel = useCallback(
+    (nextModel: string) => {
+      setModel(nextModel);
+      setReasoningEffort((current) => effortForModel(modelOptions, nextModel, current));
+    },
+    [modelOptions]
+  );
+
+  const updateConfigModel = useCallback(
+    (nextModel: string) => {
+      setConfigForm((current) => {
+        if (!current) {
+          return current;
+        }
+        return {
+          ...current,
+          defaultModel: nextModel,
+          reasoningEffort: effortForModel(modelOptions, nextModel, current.reasoningEffort)
+        };
+      });
+    },
+    [modelOptions]
+  );
+
+  const refreshConfigPage = useCallback(async () => {
+    await Promise.all([loadConfig(), loadHealth(), loadModelCatalog(true)]);
+  }, [loadConfig, loadHealth, loadModelCatalog]);
 
   return (
     <div className="app-shell">
@@ -751,6 +893,7 @@ export function App() {
             onClick={() => {
               setActiveTab("config");
               void loadConfig();
+              void loadModelCatalog();
             }}
           >
             <Settings size={18} />
@@ -918,18 +1061,19 @@ export function App() {
                 <p>{status}</p>
               </div>
               <div className="control-row">
-                <select value={model} onChange={(event) => setModel(event.target.value)}>
-                  {(config?.codex.available_models || [model]).map((item) => (
-                    <option key={item} value={item}>
-                      {item}
+                <select value={model} onChange={(event) => updateChatModel(event.target.value)}>
+                  {modelOptions.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.display_name || item.id}
                     </option>
                   ))}
                 </select>
                 <select value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value)}>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="xhigh">xhigh</option>
+                  {chatReasoningOptions.map((effort) => (
+                    <option key={effort} value={effort}>
+                      {effort}
+                    </option>
+                  ))}
                 </select>
                 <label className="compact-toggle">
                   <input
@@ -1098,7 +1242,7 @@ export function App() {
                 <h2>配置</h2>
                 <p>{config?.config_path || "config.yaml"}</p>
               </div>
-              <button className="secondary-button" onClick={() => void loadConfig()}>
+              <button className="secondary-button" onClick={() => void refreshConfigPage()}>
                 <RefreshCw size={16} />
                 刷新
               </button>
@@ -1154,10 +1298,18 @@ export function App() {
                 </label>
                 <label>
                   <span>默认模型</span>
-                  <input
+                  <select
+                    aria-label="默认模型"
                     value={configForm.defaultModel}
-                    onChange={(event) => setConfigForm({ ...configForm, defaultModel: event.target.value })}
-                  />
+                    onChange={(event) => updateConfigModel(event.target.value)}
+                  >
+                    {modelOptions.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.display_name || item.id}
+                      </option>
+                    ))}
+                  </select>
+                  {modelCatalogError ? <small className="field-error">{modelCatalogError}</small> : null}
                 </label>
                 <label>
                   <span>Reasoning effort</span>
@@ -1165,10 +1317,11 @@ export function App() {
                     value={configForm.reasoningEffort}
                     onChange={(event) => setConfigForm({ ...configForm, reasoningEffort: event.target.value })}
                   >
-                    <option value="low">low</option>
-                    <option value="medium">medium</option>
-                    <option value="high">high</option>
-                    <option value="xhigh">xhigh</option>
+                    {configReasoningOptions.map((effort) => (
+                      <option key={effort} value={effort}>
+                        {effort}
+                      </option>
+                    ))}
                   </select>
                 </label>
                 <label className="toggle-line">

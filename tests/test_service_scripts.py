@@ -24,6 +24,15 @@ def test_unix_runner_prefers_venv_and_falls_back_to_global_python() -> None:
     assert "WARNING" in script
 
 
+def test_unix_runner_exposes_common_codex_cli_paths() -> None:
+    """验证短 PATH 的后台服务也能找到 Homebrew 安装的 Codex CLI 和 Node。"""
+    script = _read_project_file("scripts/run_service.sh")
+
+    assert "/opt/homebrew/bin" in script
+    assert "/usr/local/bin" in script
+    assert "export PATH" in script
+
+
 def test_ubuntu_systemd_user_scripts_exist_and_use_user_scope() -> None:
     """验证 Ubuntu systemd 用户服务脚本存在，并使用无 sudo 的用户服务。"""
     # 安装脚本应创建 systemd user service，卸载脚本应移除同一个服务。

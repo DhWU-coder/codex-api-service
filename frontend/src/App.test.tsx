@@ -32,6 +32,29 @@ const adminHealth = {
   codex: { client_version: "0.136.0" }
 };
 
+// 模型目录测试数据模拟 Codex CLI 返回的动态模型和各自 effort 支持范围。
+const adminModelCatalog = {
+  models: [
+    {
+      id: "gpt-5.5",
+      display_name: "gpt-5.5",
+      default_reasoning_effort: "medium",
+      supported_reasoning_efforts: ["medium", "high"],
+      source: "cli"
+    },
+    {
+      id: "gpt-5.6-mini",
+      display_name: "gpt-5.6-mini",
+      default_reasoning_effort: "low",
+      supported_reasoning_efforts: ["low"],
+      source: "cli"
+    }
+  ],
+  effective_default_model: "gpt-5.5",
+  cache_state: "fresh",
+  source: "cli"
+};
+
 // 看板测试用的请求日志，模拟后端 /admin/requests 返回值。
 const requestLogItems = [
   {
@@ -63,12 +86,16 @@ const requestLogItems = [
 describe("App theme mode", () => {
   let capturedRequests: Array<{ url: string; method: string; body?: unknown }> = [];
   let healthEndpointAvailable = true;
+  let modelEndpointAvailable = true;
   let healthResponse = adminHealth;
+  let modelCatalogResponse = adminModelCatalog;
 
   beforeEach(() => {
     capturedRequests = [];
     healthEndpointAvailable = true;
+    modelEndpointAvailable = true;
     healthResponse = { ...adminHealth, oauth: { ...adminHealth.oauth } };
+    modelCatalogResponse = adminModelCatalog;
 
     // 用内存版 localStorage 规避 jsdom 在当前环境里的存储实现差异。
     const memoryStorage = new Map<string, string>();
@@ -115,6 +142,12 @@ describe("App theme mode", () => {
             return new Response(JSON.stringify({ detail: "Not Found" }), { status: 404 });
           }
           return new Response(JSON.stringify(healthResponse), { status: 200 });
+        }
+        if (url.startsWith("/admin/models")) {
+          if (!modelEndpointAvailable) {
+            return new Response(JSON.stringify({ detail: "catalog unavailable" }), { status: 503 });
+          }
+          return new Response(JSON.stringify(modelCatalogResponse), { status: 200 });
         }
         if (url === "/v1/chat/completions") {
           const streamBody =
@@ -274,6 +307,59 @@ describe("App theme mode", () => {
       expect(patchRequest?.body).toMatchObject({ codex: { fast_mode: false } });
       expect(patchRequest?.body).not.toHaveProperty("api");
     });
+  });
+
+  it("uses the dynamic model catalog for config model and effort choices", async () => {
+    // 配置页默认模型来自 /admin/models，切换模型时 effort 应自动落到新模型支持的默认值。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "配置" }));
+
+    const modelSelect = (await screen.findByLabelText("默认模型")) as HTMLSelectElement;
+    const effortSelect = (await screen.findByLabelText("Reasoning effort")) as HTMLSelectElement;
+    expect(modelSelect.tagName).toBe("SELECT");
+    expect([...modelSelect.options].map((option) => option.value)).toEqual(["gpt-5.5", "gpt-5.6-mini"]);
+    expect([...effortSelect.options].map((option) => option.value)).toEqual(["medium", "high"]);
+
+    fireEvent.change(modelSelect, { target: { value: "gpt-5.6-mini" } });
+
+    expect(effortSelect.value).toBe("low");
+    expect([...effortSelect.options].map((option) => option.value)).toEqual(["low"]);
+  });
+
+  it("refreshes and saves with the model catalog lifecycle", async () => {
+    // 手动刷新应强刷 CLI；保存后只重新读取非强制目录，避免无意义地连点 CLI。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "配置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "刷新" }));
+
+    await waitFor(() => {
+      expect(capturedRequests.some((request) => request.url === "/admin/models?refresh=true")).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(capturedRequests.some((request) => request.url === "/admin/config" && request.method === "PATCH")).toBe(
+        true
+      );
+    });
+    const patchIndex = capturedRequests.findIndex(
+      (request) => request.url === "/admin/config" && request.method === "PATCH"
+    );
+    const afterPatch = capturedRequests.slice(patchIndex + 1).map((request) => request.url);
+    expect(afterPatch).toContain("/admin/models");
+    expect(afterPatch).not.toContain("/admin/models?refresh=true");
+  });
+
+  it("falls back to config models when the model catalog cannot be loaded", async () => {
+    // 目录接口失败时仍应保留配置里的模型，避免配置页无法保存当前值。
+    modelEndpointAvailable = false;
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "配置" }));
+
+    expect(await screen.findByText("模型目录读取失败：catalog unavailable")).toBeTruthy();
+    const modelSelect = (await screen.findByLabelText("默认模型")) as HTMLSelectElement;
+    expect([...modelSelect.options].map((option) => option.value)).toEqual(["gpt-5.5"]);
   });
 
   it("filters and expands request logs", async () => {

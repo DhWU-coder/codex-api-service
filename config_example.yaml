@@ -15,7 +15,7 @@ api:
 codex:
   # 默认 Codex 模型名，客户端不传 model 时使用它。
   default_model: gpt-5.5
-  # /v1/models 暴露的模型列表；默认至少包含 default_model。
+  # 配置兜底模型列表；服务会优先用 codex debug models 动态发现可用模型。
   available_models:
     - gpt-5.5
   # Codex OAuth 后端地址；通常不需要修改。

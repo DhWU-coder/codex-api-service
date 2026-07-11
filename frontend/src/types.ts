@@ -37,6 +37,24 @@ export type AdminConfig = {
   config_path: string;
 };
 
+// 管理接口返回的单个模型目录项，用于模型和 effort 下拉。
+export type AdminModelCatalogEntry = {
+  id: string;
+  display_name: string;
+  default_reasoning_effort: string;
+  supported_reasoning_efforts: string[];
+  source: "cli" | "compatibility" | "config";
+};
+
+// 管理接口返回的动态模型目录快照。
+export type AdminModelCatalog = {
+  models: AdminModelCatalogEntry[];
+  effective_default_model: string;
+  cache_state: "fresh" | "stale" | "fallback";
+  source: string;
+  warning?: string;
+};
+
 // 管理台 health 接口返回的运行状态。
 export type AdminHealth = {
   server: { api: string; console: string };

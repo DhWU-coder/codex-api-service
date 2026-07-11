@@ -1,4 +1,11 @@
-import type { AdminConfig, AdminHealth, AuthReloadResult, ParsedChatStreamEvent, RequestLogItem } from "./types";
+import type {
+  AdminConfig,
+  AdminHealth,
+  AdminModelCatalog,
+  AuthReloadResult,
+  ParsedChatStreamEvent,
+  RequestLogItem
+} from "./types";
 
 // 构造本地服务 Bearer 鉴权头；空 key 不发送 Authorization。
 export function buildAuthHeaders(apiKey: string): Record<string, string> {
@@ -87,6 +94,18 @@ export async function fetchAdminHealth(apiKey: string): Promise<AdminHealth> {
     throw new Error(`状态读取失败：${await responseErrorMessage(response)}`);
   }
   return (await response.json()) as AdminHealth;
+}
+
+// 读取 Codex CLI 动态模型目录；force=true 时让后端强制刷新 CLI。
+export async function fetchAdminModels(apiKey: string, force = false): Promise<AdminModelCatalog> {
+  const path = force ? "/admin/models?refresh=true" : "/admin/models";
+  const response = await fetch(path, {
+    headers: buildAuthHeaders(apiKey)
+  });
+  if (!response.ok) {
+    throw new Error(`模型目录读取失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as AdminModelCatalog;
 }
 
 // 从 Codex CLI/App 登录文件重新导入 OAuth 凭据。
