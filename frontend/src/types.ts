@@ -31,10 +31,28 @@ export type AdminConfig = {
     timeout_seconds: number;
     include_reasoning: boolean;
     fast_mode: boolean;
+    model_request_defaults: Record<string, AdminModelRequestDefault>;
+    uses_legacy_request_defaults: boolean;
   };
   usage: { enabled: boolean; path: string };
   auth: { auth_path: string; import_auth_path: string };
   config_path: string;
+};
+
+// 单个真实 Codex 模型的持久化请求缺省值。
+export type AdminModelRequestDefault = {
+  reasoning_effort: string;
+  fast_mode: boolean;
+};
+
+// “模型配置”页面合并目录和持久化设置后的行状态。
+export type ModelRequestConfigRow = {
+  id: string;
+  displayName: string;
+  reasoningEffort: string;
+  fastMode: boolean;
+  supportedReasoningEfforts: string[];
+  available: boolean;
 };
 
 // 管理接口返回的单个模型目录项，用于模型和 effort 下拉。

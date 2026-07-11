@@ -58,11 +58,8 @@ from .openai_compat import (
     response_stream_event,
 )
 from .request_log import RequestLogStore
+from .request_policy import resolve_request_policy
 from .usage_log import UsageLogger
-
-
-# Codex OAuth backend 当前用 priority 表示快速服务层；本地 API 仍接受 fast 作为用户语义。
-CODEX_FAST_SERVICE_TIER = "priority"
 
 
 def create_app(
@@ -272,7 +269,10 @@ def create_app(
         body = await request.json()
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="config patch must be an object")
-        result = patch_config_file(project_root=app_config.project_root, patch=body)
+        try:
+            result = patch_config_file(project_root=app_config.project_root, patch=body)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
         if result.get("applied") is True:
             app_config = load_config(project_root=app_config.project_root)
             client.config = app_config.codex
@@ -421,9 +421,8 @@ def _chat_body_to_codex_payload(body: dict[str, Any], config: AppConfig, model: 
     messages = body.get("messages")
     if not isinstance(messages, list):
         raise HTTPException(status_code=400, detail="messages must be a list")
-    payload = _base_codex_payload(config, model)
+    payload = _base_codex_payload(config, model, body)
     payload["input"] = chat_messages_to_codex_input(messages)
-    _copy_optional_generation_fields(body, payload)
     return payload
 
 
@@ -431,11 +430,10 @@ def _responses_body_to_codex_payload(body: dict[str, Any], config: AppConfig, mo
     """把 Responses API 请求体转换为 Codex payload。"""
     if "input" not in body:
         raise HTTPException(status_code=400, detail="input is required")
-    payload = _base_codex_payload(config, model)
+    payload = _base_codex_payload(config, model, body)
     payload["input"] = normalize_responses_input(body["input"])
     if isinstance(body.get("instructions"), str):
         payload["instructions"] = body["instructions"]
-    _copy_optional_generation_fields(body, payload)
     return payload
 
 
@@ -444,7 +442,7 @@ def _anthropic_body_to_codex_payload(body: dict[str, Any], config: AppConfig, mo
     messages = body.get("messages")
     if not isinstance(messages, list):
         raise HTTPException(status_code=400, detail="messages must be a list")
-    payload = _base_codex_payload(config, model)
+    payload = _base_codex_payload(config, model, body)
     payload["input"] = anthropic_messages_to_codex_input(messages, system=body.get("system"))
     tools = anthropic_tools_to_codex_tools(body.get("tools"))
     if tools:
@@ -452,66 +450,24 @@ def _anthropic_body_to_codex_payload(body: dict[str, Any], config: AppConfig, mo
     tool_choice = anthropic_tool_choice_to_codex_tool_choice(body.get("tool_choice"))
     if tool_choice is not None:
         payload["tool_choice"] = tool_choice
-    _copy_optional_generation_fields(body, payload)
     return payload
 
 
-def _base_codex_payload(config: AppConfig, model: str) -> dict[str, Any]:
+def _base_codex_payload(config: AppConfig, model: str, body: dict[str, Any]) -> dict[str, Any]:
     """生成 Codex backend 的基础 payload。"""
+    policy = resolve_request_policy(body, config.codex, model)
     payload: dict[str, Any] = {
         "model": model,
         "instructions": config.codex.instructions,
         "stream": True,
         "store": False,
-        "reasoning": {"effort": config.codex.reasoning_effort, "summary": "auto"},
+        "reasoning": policy.reasoning,
     }
     if config.codex.include_reasoning:
         payload["include"] = ["reasoning.encrypted_content"]
-    if config.codex.fast_mode:
-        # 快速模式在本地叫 fast，但 OAuth backend 实测接受 priority 作为 service_tier。
-        payload["service_tier"] = CODEX_FAST_SERVICE_TIER
+    if policy.service_tier is not None:
+        payload["service_tier"] = policy.service_tier
     return payload
-
-
-def _copy_optional_generation_fields(source: dict[str, Any], target: dict[str, Any]) -> None:
-    """复制常见生成参数，兼容 OpenAI SDK 客户端传参。"""
-    # OpenAI SDK 常见采样、工具和格式参数由本地服务兼容接收，但 Codex OAuth backend 不支持，不能透传。
-    if isinstance(source.get("reasoning"), dict):
-        target["reasoning"] = source["reasoning"]
-    elif isinstance(source.get("reasoning_effort"), str):
-        target["reasoning"] = {"effort": source["reasoning_effort"], "summary": "auto"}
-    _apply_service_tier_override(source, target)
-
-
-def _apply_service_tier_override(source: dict[str, Any], target: dict[str, Any]) -> None:
-    """根据请求体覆盖 Codex fast service tier。"""
-    # fast_mode 是本服务提供的布尔开关，优先级高于 service_tier 字符串。
-    if "fast_mode" in source:
-        if _request_bool(source["fast_mode"]):
-            target["service_tier"] = CODEX_FAST_SERVICE_TIER
-        else:
-            target.pop("service_tier", None)
-        return
-
-    # service_tier 贴近 Codex CLI/config.toml 语义，方便外部客户端直接传参。
-    if "service_tier" in source:
-        tier = str(source["service_tier"]).strip().lower()
-        if tier in {"fast", CODEX_FAST_SERVICE_TIER}:
-            target["service_tier"] = CODEX_FAST_SERVICE_TIER
-        elif tier in {"", "auto", "default", "standard"}:
-            target.pop("service_tier", None)
-        else:
-            target["service_tier"] = tier
-
-
-def _request_bool(value: Any) -> bool:
-    """把请求体里的布尔开关规范化，兼容少量字符串写法。"""
-    # JSON 客户端通常会传 bool；字符串兼容命令行 curl 手写场景。
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on", "fast"}
-    return bool(value)
 
 
 async def _stream_chat_completion(

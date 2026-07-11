@@ -13,7 +13,11 @@ const adminConfig = {
     reasoning_effort: "medium",
     timeout_seconds: 120,
     include_reasoning: true,
-    fast_mode: true
+    fast_mode: true,
+    model_request_defaults: {
+      "gpt-5.5": { reasoning_effort: "medium", fast_mode: true }
+    },
+    uses_legacy_request_defaults: false
   },
   usage: { enabled: true, path: ".codex-usage/usage.jsonl" },
   auth: { auth_path: "~/.codex/auth.json", import_auth_path: "~/.codex/auth.json" },
@@ -217,7 +221,7 @@ describe("App theme mode", () => {
     fireEvent.click(await screen.findByRole("button", { name: "配置" }));
     expect(await screen.findByRole("heading", { name: "运行状态" })).toBeTruthy();
     expect(await screen.findByText("登录：已检测到")).toBeTruthy();
-    expect(await screen.findByText("速度：快速")).toBeTruthy();
+    expect(await screen.findByText("请求：按模型配置")).toBeTruthy();
     expect(await screen.findByText("用量：正常")).toBeTruthy();
     expect(await screen.findByText("CLI：0.136.0")).toBeTruthy();
   });
@@ -289,41 +293,44 @@ describe("App theme mode", () => {
     });
   });
 
-  it("saves the default fast mode from the config page", async () => {
-    // 配置页保存的是服务默认值，修改后需要后端重启才生效。
+  it("saves model defaults from the independent model config page", async () => {
+    // 独立模型配置页保存完整非默认覆盖映射。
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "配置" }));
-    const defaultFastToggle = (await screen.findByRole("checkbox", { name: "默认快速模式" })) as HTMLInputElement;
+    fireEvent.click(await screen.findByRole("button", { name: "模型配置" }));
+    const defaultFastToggle = (await screen.findByRole("checkbox", { name: "gpt-5.5 快速模式" })) as HTMLInputElement;
     expect(defaultFastToggle.checked).toBe(true);
 
-    // 关闭默认 fast 并保存，PATCH body 应写入 codex.fast_mode=false。
+    // 恢复固定默认后保存，映射中不应保留该模型。
     fireEvent.click(defaultFastToggle);
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存模型配置" }));
 
     await waitFor(() => {
       const patchRequest = capturedRequests.find(
         (request) => request.url === "/admin/config" && request.method === "PATCH"
       );
-      expect(patchRequest?.body).toMatchObject({ codex: { fast_mode: false } });
+      expect(patchRequest?.body).toEqual({ codex: { model_request_defaults: {} } });
       expect(patchRequest?.body).not.toHaveProperty("api");
     });
   });
 
-  it("uses the dynamic model catalog for config model and effort choices", async () => {
-    // 配置页默认模型来自 /admin/models，切换模型时 effort 应自动落到新模型支持的默认值。
+  it("uses the dynamic model catalog for independent model effort choices", async () => {
+    // 模型配置页为每个目录模型展示独立 effort 选项。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "模型配置" }));
+
+    const effortSelect = (await screen.findByLabelText("gpt-5.5 Effort")) as HTMLSelectElement;
+    expect([...effortSelect.options].map((option) => option.value)).toEqual(["medium", "high"]);
+    expect(await screen.findByLabelText("gpt-5.6-mini Effort")).toBeTruthy();
+  });
+
+  it("keeps only default model on the ordinary config page", async () => {
+    // 服务配置页不再展示全局 effort 和快速模式。
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "配置" }));
 
-    const modelSelect = (await screen.findByLabelText("默认模型")) as HTMLSelectElement;
-    const effortSelect = (await screen.findByLabelText("Reasoning effort")) as HTMLSelectElement;
-    expect(modelSelect.tagName).toBe("SELECT");
-    expect([...modelSelect.options].map((option) => option.value)).toEqual(["gpt-5.5", "gpt-5.6-mini"]);
-    expect([...effortSelect.options].map((option) => option.value)).toEqual(["medium", "high"]);
-
-    fireEvent.change(modelSelect, { target: { value: "gpt-5.6-mini" } });
-
-    expect(effortSelect.value).toBe("low");
-    expect([...effortSelect.options].map((option) => option.value)).toEqual(["low"]);
+    expect(await screen.findByLabelText("默认模型")).toBeTruthy();
+    expect(screen.queryByText("Reasoning effort")).toBeNull();
+    expect(screen.queryByText("默认快速模式")).toBeNull();
   });
 
   it("refreshes and saves with the model catalog lifecycle", async () => {

@@ -13,6 +13,7 @@ import {
   Save,
   Send,
   Settings,
+  SlidersHorizontal,
   Sun,
   Square,
   Zap
@@ -38,6 +39,11 @@ import {
   type DashboardRangePreset,
   type DashboardTimelineBucket
 } from "./dashboard";
+import {
+  buildModelRequestRows,
+  requestDefaultsForModel,
+  serializeModelRequestOverrides
+} from "./modelRequestConfig";
 import type {
   AdminConfig,
   AdminHealth,
@@ -45,11 +51,12 @@ import type {
   AdminModelCatalogEntry,
   ChatMessage,
   ChatUsage,
+  ModelRequestConfigRow,
   RequestLogItem
 } from "./types";
 
 // 顶部导航标签的枚举，保持状态值简短稳定。
-type ActiveTab = "dashboard" | "chat" | "logs" | "config";
+type ActiveTab = "dashboard" | "chat" | "logs" | "config" | "model-config";
 
 // 控制台主题只提供明确的浅色和深色两种渲染结果。
 type ThemeMode = "light" | "dark";
@@ -77,8 +84,6 @@ type ConfigFormState = {
   localApiKey: string;
   localApiKeyTouched: boolean;
   defaultModel: string;
-  reasoningEffort: string;
-  fastMode: boolean;
   usageEnabled: boolean;
   authPath: string;
   importAuthPath: string;
@@ -95,8 +100,6 @@ function formFromConfig(config: AdminConfig): ConfigFormState {
     localApiKey: "",
     localApiKeyTouched: false,
     defaultModel: config.codex.default_model,
-    reasoningEffort: config.codex.reasoning_effort,
-    fastMode: config.codex.fast_mode,
     usageEnabled: config.usage.enabled,
     authPath: config.auth.auth_path,
     importAuthPath: config.auth.import_auth_path
@@ -183,14 +186,14 @@ function currentDisplayHost(): string {
 }
 
 // 把 health/config 的技术字段翻译成控制台里可读的中文运行状态。
-function runtimeStatusView(health: AdminHealth | null, fastMode: boolean, healthError: string) {
+function runtimeStatusView(health: AdminHealth | null, healthError: string) {
   if (healthError) {
     const missingEndpoint = /404|not found/i.test(healthError);
     return {
       tone: "attention",
       summary: missingEndpoint ? "需要更新" : "需要检查",
       hint: missingEndpoint ? "运行状态接口不可用，请重启服务" : "运行状态读取失败，请检查访问密钥",
-      details: ["登录：未读取", `速度：${fastMode ? "快速" : "标准"}`, "用量：未读取", "CLI：未读取"]
+      details: ["登录：未读取", "请求：按模型配置", "用量：未读取", "CLI：未读取"]
     };
   }
 
@@ -199,7 +202,7 @@ function runtimeStatusView(health: AdminHealth | null, fastMode: boolean, health
       tone: "pending",
       summary: "读取中",
       hint: "正在读取运行状态",
-      details: ["登录：读取中", `速度：${fastMode ? "快速" : "标准"}`, "用量：读取中", "CLI：读取中"]
+      details: ["登录：读取中", "请求：按模型配置", "用量：读取中", "CLI：读取中"]
     };
   }
 
@@ -225,7 +228,7 @@ function runtimeStatusView(health: AdminHealth | null, fastMode: boolean, health
     hint: needsAttention ? "打开配置页查看详情" : "OAuth 和日志状态正常",
     details: [
       `登录：${loginText}`,
-      `速度：${fastMode ? "快速" : "标准"}`,
+      "请求：按模型配置",
       `用量：${usageText}`,
       `CLI：${cliVersion}`
     ]
@@ -453,7 +456,7 @@ export function App() {
   const [input, setInput] = useState("");
   const [model, setModel] = useState("gpt-5.5");
   const [reasoningEffort, setReasoningEffort] = useState("medium");
-  const [fastMode, setFastMode] = useState(true);
+  const [fastMode, setFastMode] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [usage, setUsage] = useState<ChatUsage | null>(null);
   const [status, setStatus] = useState("就绪");
@@ -466,6 +469,9 @@ export function App() {
   const [modelCatalog, setModelCatalog] = useState<AdminModelCatalog | null>(null);
   const [modelCatalogError, setModelCatalogError] = useState("");
   const [configSavedNote, setConfigSavedNote] = useState("");
+  const [modelRequestRows, setModelRequestRows] = useState<ModelRequestConfigRow[]>([]);
+  const [modelRequestDirty, setModelRequestDirty] = useState(false);
+  const [modelConfigSavedNote, setModelConfigSavedNote] = useState("");
   const [authReloadNote, setAuthReloadNote] = useState("");
   const [isReloadingAuth, setIsReloadingAuth] = useState(false);
   const [dashboardPreset, setDashboardPreset] = useState<DashboardRangePreset>("today");
@@ -475,6 +481,7 @@ export function App() {
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
+  const modelRequestDirtyRef = useRef(false);
 
   // layout effect 可以在浏览器绘制前应用主题，避免启动时闪一下错误主题。
   useLayoutEffect(() => {
@@ -511,8 +518,6 @@ export function App() {
       setConfig(loaded);
       setConfigForm(formFromConfig(loaded));
       setModel(loaded.codex.default_model);
-      setReasoningEffort(loaded.codex.reasoning_effort);
-      setFastMode(loaded.codex.fast_mode);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "配置读取失败");
     }
@@ -556,7 +561,7 @@ export function App() {
     }
   }, [apiKey]);
 
-  // 配置加载成功后，同步默认模型、effort 和动态目录到聊天区。
+  // 配置加载成功后，同步默认模型和动态目录到聊天区。
   useEffect(() => {
     void loadConfig();
     void loadModelCatalog();
@@ -721,9 +726,7 @@ export function App() {
       const result = await saveAdminConfig(apiKey, {
         ...(configForm.localApiKeyTouched ? { api: { local_api_key: configForm.localApiKey } } : {}),
         codex: {
-          default_model: configForm.defaultModel,
-          reasoning_effort: configForm.reasoningEffort,
-          fast_mode: configForm.fastMode
+          default_model: configForm.defaultModel
         },
         usage: { enabled: configForm.usageEnabled },
         auth: {
@@ -740,6 +743,23 @@ export function App() {
       setError(caught instanceof Error ? caught.message : "配置保存失败");
     }
   }, [apiKey, configForm, loadConfig, loadHealth, loadModelCatalog]);
+
+  // 保存全部模型请求缺省值；序列化时省略 medium/false，保持配置文件简洁。
+  const saveModelConfig = useCallback(async () => {
+    try {
+      setError("");
+      setModelConfigSavedNote("");
+      const result = await saveAdminConfig(apiKey, {
+        codex: { model_request_defaults: serializeModelRequestOverrides(modelRequestRows) }
+      });
+      setModelConfigSavedNote(result.restart_required ? "已保存，重启服务后生效" : "已保存，已立即生效");
+      modelRequestDirtyRef.current = false;
+      setModelRequestDirty(false);
+      await Promise.all([loadConfig(), loadHealth(), loadModelCatalog()]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "模型配置保存失败");
+    }
+  }, [apiKey, loadConfig, loadHealth, loadModelCatalog, modelRequestRows]);
 
   // 从 Codex CLI/App 的登录文件同步 OAuth 凭据，解决本服务缓存旧 token 的场景。
   const reloadAuth = useCallback(async () => {
@@ -775,8 +795,8 @@ export function App() {
 
   // 中文运行状态同时驱动左侧汇总和配置页明细，避免两处文案漂移。
   const runtimeStatus = useMemo(
-    () => runtimeStatusView(health, fastMode, healthError),
-    [fastMode, health, healthError]
+    () => runtimeStatusView(health, healthError),
+    [health, healthError]
   );
 
   const modelOptions = useMemo(
@@ -785,53 +805,49 @@ export function App() {
         modelCatalog,
         config,
         [model, configForm?.defaultModel || ""],
-        configForm?.reasoningEffort || reasoningEffort
+        "medium"
       ),
-    [config, configForm?.defaultModel, configForm?.reasoningEffort, model, modelCatalog, reasoningEffort]
+    [config, configForm?.defaultModel, model, modelCatalog]
   );
   const chatReasoningOptions = useMemo(() => reasoningOptionsFor(modelOptions, model), [model, modelOptions]);
-  const configReasoningOptions = useMemo(
-    () => reasoningOptionsFor(modelOptions, configForm?.defaultModel || model),
-    [configForm?.defaultModel, model, modelOptions]
-  );
+
+  // 目录或配置变化时刷新模型配置行，但保留用户尚未保存的编辑。
+  useEffect(() => {
+    if (!config || modelRequestDirtyRef.current) {
+      return;
+    }
+    const rows = buildModelRequestRows(modelCatalog, config);
+    setModelRequestRows(rows);
+    const defaults = requestDefaultsForModel(rows, config.codex.default_model);
+    setReasoningEffort(defaults.reasoning_effort);
+    setFastMode(defaults.fast_mode);
+  }, [config, modelCatalog, modelRequestDirty]);
 
   // 目录刷新后，如果当前 effort 不再被所选模型支持，自动切到该模型默认值。
   useEffect(() => {
     setReasoningEffort((current) => effortForModel(modelOptions, model, current));
   }, [model, modelOptions]);
 
-  useEffect(() => {
-    setConfigForm((current) => {
-      if (!current) {
-        return current;
-      }
-      const nextEffort = effortForModel(modelOptions, current.defaultModel, current.reasoningEffort);
-      return nextEffort === current.reasoningEffort ? current : { ...current, reasoningEffort: nextEffort };
-    });
-  }, [modelOptions]);
-
   const updateChatModel = useCallback(
     (nextModel: string) => {
       setModel(nextModel);
-      setReasoningEffort((current) => effortForModel(modelOptions, nextModel, current));
+      const defaults = requestDefaultsForModel(modelRequestRows, nextModel);
+      setReasoningEffort(effortForModel(modelOptions, nextModel, defaults.reasoning_effort));
+      setFastMode(defaults.fast_mode);
     },
-    [modelOptions]
+    [modelOptions, modelRequestRows]
   );
 
-  const updateConfigModel = useCallback(
-    (nextModel: string) => {
-      setConfigForm((current) => {
-        if (!current) {
-          return current;
-        }
-        return {
-          ...current,
-          defaultModel: nextModel,
-          reasoningEffort: effortForModel(modelOptions, nextModel, current.reasoningEffort)
-        };
-      });
+  const updateModelRequestRow = useCallback(
+    (modelId: string, patch: Partial<Pick<ModelRequestConfigRow, "reasoningEffort" | "fastMode">>) => {
+      setModelRequestRows((current) =>
+        current.map((row) => (row.id === modelId ? { ...row, ...patch } : row))
+      );
+      modelRequestDirtyRef.current = true;
+      setModelRequestDirty(true);
+      setModelConfigSavedNote("");
     },
-    [modelOptions]
+    []
   );
 
   const refreshConfigPage = useCallback(async () => {
@@ -898,6 +914,17 @@ export function App() {
           >
             <Settings size={18} />
             配置
+          </button>
+          <button
+            className={activeTab === "model-config" ? "active" : ""}
+            onClick={() => {
+              setActiveTab("model-config");
+              void loadConfig();
+              void loadModelCatalog();
+            }}
+          >
+            <SlidersHorizontal size={18} />
+            模型配置
           </button>
         </nav>
 
@@ -1301,7 +1328,7 @@ export function App() {
                   <select
                     aria-label="默认模型"
                     value={configForm.defaultModel}
-                    onChange={(event) => updateConfigModel(event.target.value)}
+                    onChange={(event) => setConfigForm({ ...configForm, defaultModel: event.target.value })}
                   >
                     {modelOptions.map((item) => (
                       <option key={item.id} value={item.id}>
@@ -1310,27 +1337,6 @@ export function App() {
                     ))}
                   </select>
                   {modelCatalogError ? <small className="field-error">{modelCatalogError}</small> : null}
-                </label>
-                <label>
-                  <span>Reasoning effort</span>
-                  <select
-                    value={configForm.reasoningEffort}
-                    onChange={(event) => setConfigForm({ ...configForm, reasoningEffort: event.target.value })}
-                  >
-                    {configReasoningOptions.map((effort) => (
-                      <option key={effort} value={effort}>
-                        {effort}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="toggle-line">
-                  <input
-                    type="checkbox"
-                    checked={configForm.fastMode}
-                    onChange={(event) => setConfigForm({ ...configForm, fastMode: event.target.checked })}
-                  />
-                  <span>默认快速模式</span>
                 </label>
                 <label>
                   <span>Auth path</span>
@@ -1373,6 +1379,99 @@ export function App() {
               <button className="primary-button" onClick={() => void saveConfig()} disabled={!configForm}>
                 <Save size={16} />
                 保存
+              </button>
+            </div>
+          </section>
+        ) : null}
+
+        {activeTab === "model-config" ? (
+          <section className="panel" aria-label="模型配置">
+            <header className="toolbar">
+              <div>
+                <h2>模型配置</h2>
+                <p>请求未显式传参时，按真实 Codex 模型应用以下缺省值。</p>
+              </div>
+              <button className="secondary-button" onClick={() => void loadModelCatalog(true)}>
+                <RefreshCw size={16} />
+                刷新模型
+              </button>
+            </header>
+
+            {modelRequestRows.length ? (
+              <div className="model-config-list">
+                <div className="model-config-header" aria-hidden="true">
+                  <span>模型</span>
+                  <span>Reasoning effort</span>
+                  <span>快速模式</span>
+                  <span>操作</span>
+                </div>
+                {modelRequestRows.map((row) => (
+                  <div className="model-config-row" key={row.id}>
+                    <div className="model-config-name">
+                      <strong>{row.displayName}</strong>
+                      <small>{row.id}</small>
+                      {!row.available ? <span className="model-unavailable">当前不可用</span> : null}
+                    </div>
+                    <label>
+                      <span className="mobile-field-label">Reasoning effort</span>
+                      <select
+                        aria-label={`${row.id} Effort`}
+                        value={row.reasoningEffort}
+                        onChange={(event) =>
+                          updateModelRequestRow(row.id, { reasoningEffort: event.target.value })
+                        }
+                      >
+                        {row.supportedReasoningEfforts.map((effort) => (
+                          <option key={effort} value={effort}>
+                            {effort}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="model-fast-toggle">
+                      <input
+                        aria-label={`${row.id} 快速模式`}
+                        type="checkbox"
+                        checked={row.fastMode}
+                        onChange={(event) => updateModelRequestRow(row.id, { fastMode: event.target.checked })}
+                      />
+                      <span>快速模式</span>
+                    </label>
+                    <button
+                      aria-label={`${row.id} 恢复默认`}
+                      className="secondary-button"
+                      type="button"
+                      onClick={() =>
+                        updateModelRequestRow(row.id, { reasoningEffort: "medium", fastMode: false })
+                      }
+                    >
+                      恢复默认
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <SlidersHorizontal size={28} />
+                <h3>模型目录未加载</h3>
+                <p>{modelCatalogError || "刷新模型目录后再配置。"}</p>
+              </div>
+            )}
+
+            <div className="save-row">
+              {modelConfigSavedNote ? (
+                <span className="saved-note">
+                  <CheckCircle2 size={16} />
+                  {modelConfigSavedNote}
+                </span>
+              ) : null}
+              <button
+                className="primary-button"
+                onClick={() => void saveModelConfig()}
+                disabled={!modelRequestRows.length}
+              >
+                <Save size={16} />
+                保存模型配置
               </button>
             </div>
           </section>

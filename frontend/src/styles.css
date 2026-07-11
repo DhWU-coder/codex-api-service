@@ -1443,6 +1443,79 @@ th {
   border-top: 1px solid var(--panel-divider);
 }
 
+/* 模型配置按目录逐行展示，桌面端保持四列便于快速扫描。 */
+.model-config-list {
+  display: grid;
+  gap: 0;
+  padding: 18px;
+}
+
+.model-config-header,
+.model-config-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.4fr) minmax(180px, 1fr) minmax(130px, 0.6fr) auto;
+  gap: 16px;
+  align-items: center;
+}
+
+.model-config-header {
+  padding: 0 14px 10px;
+  color: var(--page-muted);
+  font-size: 12px;
+}
+
+.model-config-row {
+  min-height: 76px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--panel-divider);
+}
+
+.model-config-row label {
+  min-width: 0;
+}
+
+.model-config-name {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.model-config-name strong,
+.model-config-name small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-config-name small {
+  color: var(--page-muted);
+}
+
+.model-unavailable {
+  width: fit-content;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--status-fail-text);
+  background: var(--status-fail-bg);
+  font-size: 11px;
+}
+
+.model-fast-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--page-title);
+  white-space: nowrap;
+}
+
+.model-fast-toggle input {
+  width: auto;
+}
+
+.mobile-field-label {
+  display: none;
+}
+
 /* 窄屏下侧栏改为顶部，保证移动设备可用。 */
 @media (max-width: 820px) {
   .app-shell {
@@ -1508,6 +1581,23 @@ th {
 
   .config-grid {
     grid-template-columns: 1fr;
+  }
+
+  .model-config-header {
+    display: none;
+  }
+
+  .model-config-row {
+    grid-template-columns: 1fr;
+    gap: 12px;
+    padding: 16px 0;
+  }
+
+  .mobile-field-label {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--page-muted);
+    font-size: 12px;
   }
 
   .runtime-detail-head {

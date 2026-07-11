@@ -7,7 +7,13 @@ from typing import Any
 
 import yaml
 
-from .config import AppConfig, load_config
+from .config import (
+    DEFAULT_MODEL_FAST_MODE,
+    DEFAULT_MODEL_REASONING_EFFORT,
+    AppConfig,
+    load_config,
+    parse_model_request_defaults,
+)
 
 
 def safe_config_snapshot(config: AppConfig) -> dict[str, Any]:
@@ -22,6 +28,14 @@ def safe_config_snapshot(config: AppConfig) -> dict[str, Any]:
             "timeout_seconds": config.codex.timeout_seconds,
             "include_reasoning": config.codex.include_reasoning,
             "fast_mode": config.codex.fast_mode,
+            "model_request_defaults": {
+                model: {
+                    "reasoning_effort": defaults.reasoning_effort,
+                    "fast_mode": defaults.fast_mode,
+                }
+                for model, defaults in config.codex.model_request_defaults.items()
+            },
+            "uses_legacy_request_defaults": config.codex.uses_legacy_request_defaults,
         },
         "usage": {"enabled": config.usage.enabled, "path": str(config.usage.path)},
         "auth": {
@@ -54,6 +68,20 @@ def patch_config_file(*, project_root: Path, patch: dict[str, Any]) -> dict[str,
         if "fast_mode" in codex_patch:
             # fast_mode 是布尔开关，写入 YAML 时保留原生 true/false。
             codex_section["fast_mode"] = bool(codex_patch["fast_mode"])
+        if "model_request_defaults" in codex_patch:
+            parsed_defaults = parse_model_request_defaults(codex_patch["model_request_defaults"])
+            codex_section["model_request_defaults"] = {
+                model: {
+                    "reasoning_effort": defaults.reasoning_effort,
+                    "fast_mode": defaults.fast_mode,
+                }
+                for model, defaults in parsed_defaults.items()
+                if defaults.reasoning_effort != DEFAULT_MODEL_REASONING_EFFORT
+                or defaults.fast_mode != DEFAULT_MODEL_FAST_MODE
+            }
+            # 新映射存在即完成迁移，删除会与固定兜底冲突的旧全局字段。
+            codex_section.pop("reasoning_effort", None)
+            codex_section.pop("fast_mode", None)
 
     if isinstance(patch.get("usage"), dict):
         usage_patch = patch["usage"]

@@ -69,8 +69,10 @@ api:
 
 codex:
   default_model: gpt-5.5
-  reasoning_effort: medium
-  fast_mode: true
+  model_request_defaults:
+    gpt-5.5:
+      reasoning_effort: high
+      fast_mode: true
 
 usage:
   enabled: true
@@ -245,7 +247,8 @@ The console includes three pages:
 
 - Chat: stream chat directly through `/v1/chat/completions`.
 - Request logs: inspect recent endpoints, models, status codes, latency, and token usage, with filtering and expandable details.
-- Configuration: edit common `config.yaml` fields. Model and reasoning effort choices come from the dynamic Codex CLI catalog; fast mode, usage logging, and API key changes apply immediately.
+- Configuration: edit the default model, usage logging, authentication paths, and API key.
+- Model configuration: set the default reasoning effort and fast mode for every real model in the dynamic Codex CLI catalog.
 - Status strip: show OAuth, Fast, usage logging, and Codex CLI version status.
 
 The chat page supports Markdown fenced code blocks and per-block copy actions.
@@ -260,8 +263,9 @@ npm --prefix frontend run build
 
 ## OpenAI SDK Example
 
-Codex Fast service tier is enabled by default. If the request body does not set a fast-mode option, the service uses `codex.fast_mode` from `config.yaml`.
-Requests can temporarily override it with `fast_mode`, or pass `service_tier="fast"`.
+When callers omit explicit request options, the service uses the real model's entry in `codex.model_request_defaults`.
+Unconfigured models use `reasoning_effort="medium"` with fast mode disabled. Requests can override model defaults with
+`reasoning_effort`, `reasoning.effort`, `fast_mode`, or `service_tier`.
 The service maps fast mode to the Codex OAuth backend value `service_tier="priority"`.
 
 The compatibility layer accepts common OpenAI SDK parameters, including `temperature`, `top_p`, `max_tokens`, `max_output_tokens`, `response_format`, `tools`, `tool_choice`, `stop`, `seed`, and penalty parameters.
@@ -278,7 +282,7 @@ client = OpenAI(
 response = client.chat.completions.create(
     model="gpt-5.5",
     messages=[{"role": "user", "content": "Hello, introduce yourself"}],
-    extra_body={"fast_mode": False},  # Temporarily disable Fast; omit this to use config.yaml.
+    extra_body={"fast_mode": False},  # Explicit values win; omit this to use the model default.
 )
 
 print(response.choices[0].message.content)

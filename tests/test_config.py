@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from codex_api_service.config import load_config
 
 
@@ -130,3 +132,60 @@ def test_load_config_keeps_legacy_codex_cli_auth_path_alias(tmp_path: Path) -> N
     config = load_config(project_root=tmp_path, config_path=config_path)
 
     assert config.auth.import_auth_path == tmp_path / "legacy" / "auth.json"
+
+
+def test_load_config_parses_model_request_defaults(tmp_path: Path) -> None:
+    """验证按模型 effort 和快速模式会被规范化读取。"""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+codex:
+  model_request_defaults:
+    gpt-5.4:
+      reasoning_effort: high
+      fast_mode: true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(project_root=tmp_path, config_path=config_path)
+
+    defaults = config.codex.model_request_defaults["gpt-5.4"]
+    assert defaults.reasoning_effort == "high"
+    assert defaults.fast_mode is True
+    assert config.codex.uses_legacy_request_defaults is False
+
+
+def test_load_config_distinguishes_new_and_legacy_request_defaults(tmp_path: Path) -> None:
+    """验证空映射使用新语义，只有旧字段时才启用兼容模式。"""
+    new_path = tmp_path / "new.yaml"
+    new_path.write_text("codex:\n  model_request_defaults: {}\n", encoding="utf-8")
+    legacy_path = tmp_path / "legacy.yaml"
+    legacy_path.write_text("codex:\n  reasoning_effort: high\n  fast_mode: true\n", encoding="utf-8")
+
+    new_config = load_config(project_root=tmp_path, config_path=new_path)
+    legacy_config = load_config(project_root=tmp_path, config_path=legacy_path)
+    empty_config = load_config(project_root=tmp_path, config_path=tmp_path / "missing.yaml")
+
+    assert new_config.codex.model_request_defaults == {}
+    assert new_config.codex.uses_legacy_request_defaults is False
+    assert legacy_config.codex.uses_legacy_request_defaults is True
+    assert empty_config.codex.uses_legacy_request_defaults is False
+
+
+@pytest.mark.parametrize(
+    "yaml_text",
+    [
+        "codex:\n  model_request_defaults: []\n",
+        "codex:\n  model_request_defaults:\n    ' ': {reasoning_effort: high, fast_mode: true}\n",
+        "codex:\n  model_request_defaults:\n    gpt-5.4: {reasoning_effort: 123, fast_mode: true}\n",
+        "codex:\n  model_request_defaults:\n    gpt-5.4: {reasoning_effort: high, fast_mode: maybe}\n",
+    ],
+)
+def test_load_config_rejects_invalid_model_request_defaults(tmp_path: Path, yaml_text: str) -> None:
+    """验证非法按模型配置不会被静默吞掉。"""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml_text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="model_request_defaults"):
+        load_config(project_root=tmp_path, config_path=config_path)

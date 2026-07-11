@@ -22,6 +22,10 @@ DEFAULT_USAGE_PROVIDER = "openai-codex"
 DEFAULT_USAGE_AUTH = "codex-oauth"
 DEFAULT_USAGE_API_SURFACE = "chatgpt-codex-responses"
 
+# 新按模型配置未命中时使用固定标准请求参数。
+DEFAULT_MODEL_REASONING_EFFORT = "medium"
+DEFAULT_MODEL_FAST_MODE = False
+
 
 @dataclass(frozen=True)
 class ServerConfig:
@@ -39,6 +43,14 @@ class ApiConfig:
 
 
 @dataclass(frozen=True)
+class ModelRequestDefaults:
+    """描述单个真实 Codex 模型的请求缺省值。"""
+
+    reasoning_effort: str = DEFAULT_MODEL_REASONING_EFFORT
+    fast_mode: bool = DEFAULT_MODEL_FAST_MODE
+
+
+@dataclass(frozen=True)
 class CodexConfig:
     """描述访问 Codex backend 时需要的模型和请求配置。"""
 
@@ -50,6 +62,8 @@ class CodexConfig:
     instructions: str = DEFAULT_INSTRUCTIONS
     include_reasoning: bool = True
     fast_mode: bool = True
+    model_request_defaults: dict[str, ModelRequestDefaults] = field(default_factory=dict)
+    uses_legacy_request_defaults: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,6 +139,10 @@ def load_config(
     default_model = str(_nested_get(raw_config, ["codex", "default_model"], "gpt-5.5"))
     configured_models = _nested_get(raw_config, ["codex", "available_models"], None)
     available_models = _normalize_models(configured_models, default_model)
+    codex_raw = raw_config.get("codex") if isinstance(raw_config.get("codex"), dict) else {}
+    has_model_defaults = "model_request_defaults" in codex_raw
+    has_legacy_defaults = "reasoning_effort" in codex_raw or "fast_mode" in codex_raw
+    model_request_defaults = parse_model_request_defaults(codex_raw.get("model_request_defaults", {}))
     codex = CodexConfig(
         default_model=default_model,
         available_models=available_models,
@@ -134,6 +152,8 @@ def load_config(
         instructions=str(_nested_get(raw_config, ["codex", "instructions"], DEFAULT_INSTRUCTIONS)),
         include_reasoning=bool(_nested_get(raw_config, ["codex", "include_reasoning"], True)),
         fast_mode=_bool_value(_nested_get(raw_config, ["codex", "fast_mode"], True)),
+        model_request_defaults=model_request_defaults,
+        uses_legacy_request_defaults=not has_model_defaults and has_legacy_defaults,
     )
 
     # 日志路径支持相对路径；相对路径统一解析到项目根目录下。
@@ -215,6 +235,42 @@ def _bool_value(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def parse_model_request_defaults(value: Any) -> dict[str, ModelRequestDefaults]:
+    """严格解析按模型请求缺省值映射。"""
+    if not isinstance(value, dict):
+        raise ValueError("codex.model_request_defaults must be a mapping")
+    parsed: dict[str, ModelRequestDefaults] = {}
+    for raw_model, raw_defaults in value.items():
+        model = str(raw_model).strip()
+        if not model:
+            raise ValueError("codex.model_request_defaults contains a blank model id")
+        if not isinstance(raw_defaults, dict):
+            raise ValueError(f"codex.model_request_defaults.{model} must be a mapping")
+        raw_effort = raw_defaults.get("reasoning_effort", DEFAULT_MODEL_REASONING_EFFORT)
+        if not isinstance(raw_effort, str) or not raw_effort.strip():
+            raise ValueError(f"codex.model_request_defaults.{model}.reasoning_effort must be a string")
+        raw_fast_mode = raw_defaults.get("fast_mode", DEFAULT_MODEL_FAST_MODE)
+        fast_mode = _strict_bool(raw_fast_mode, field_name=f"codex.model_request_defaults.{model}.fast_mode")
+        parsed[model] = ModelRequestDefaults(
+            reasoning_effort=raw_effort.strip(),
+            fast_mode=fast_mode,
+        )
+    return parsed
+
+
+def _strict_bool(value: Any, *, field_name: str) -> bool:
+    """严格规范化配置布尔值，拒绝含义不明确的字符串。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(f"{field_name} must be a boolean")
 
 
 def _normalize_models(value: Any, default_model: str) -> tuple[str, ...]:

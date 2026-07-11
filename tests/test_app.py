@@ -7,7 +7,15 @@ from httpx import ASGITransport, AsyncClient
 
 from codex_api_service.app import create_app
 from codex_api_service.codex_client import CodexHTTPStatusError, CodexUnexpectedResponseError
-from codex_api_service.config import AppConfig, ApiConfig, AuthConfig, CodexConfig, ServerConfig, UsageConfig
+from codex_api_service.config import (
+    AppConfig,
+    ApiConfig,
+    AuthConfig,
+    CodexConfig,
+    ModelRequestDefaults,
+    ServerConfig,
+    UsageConfig,
+)
 from codex_api_service.model_catalog import ModelCatalogEntry, ModelCatalogSnapshot
 
 
@@ -273,7 +281,7 @@ async def test_chat_completions_route_returns_openai_completion_and_logs_usage(t
 
     # 转给 Codex 的 payload 使用 Responses input 结构。
     assert fake_client.payloads[0]["input"][0]["content"][0]["text"] == "hello"
-    assert fake_client.payloads[0]["service_tier"] == "priority"
+    assert "service_tier" not in fake_client.payloads[0]
 
     # 成功返回后必须写入 codex-usage 可导入的 JSONL。
     log_lines = (tmp_path / ".codex-usage" / "usage.jsonl").read_text(encoding="utf-8").splitlines()
@@ -611,6 +619,63 @@ async def test_chat_completions_fast_mode_request_overrides_default(tmp_path: Pa
     # fast_mode=false 不向 Codex backend 发送 service_tier，等价于 CLI 的 /fast off。
     assert response.status_code == 200
     assert "service_tier" not in fake_client.payloads[0]
+
+
+@pytest.mark.asyncio
+async def test_routes_apply_real_model_defaults_and_explicit_overrides(tmp_path: Path) -> None:
+    """验证 Chat、Responses 和 Anthropic 共享真实模型请求配置。"""
+    config = AppConfig(
+        project_root=tmp_path,
+        codex=CodexConfig(
+            default_model="gpt-5.4",
+            model_request_defaults={
+                "gpt-5.4": ModelRequestDefaults(reasoning_effort="high", fast_mode=True)
+            },
+        ),
+        usage=UsageConfig(path=tmp_path / ".codex-usage" / "usage.jsonl"),
+    )
+    fake_client = FakeCodexClient()
+    app = create_app(
+        config=config,
+        codex_client=fake_client,
+        model_catalog=FakeModelCatalog(model_snapshot("gpt-5.4")),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        chat = await client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "chat"}]},
+        )
+        responses = await client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.4",
+                "input": "response",
+                "reasoning": {"summary": "detailed"},
+                "reasoning_effort": "low",
+                "fast_mode": False,
+            },
+        )
+        anthropic = await client.post(
+            "/anthropic/v1/messages",
+            json={
+                "model": "claude-sonnet-5-4",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "anthropic"}],
+            },
+        )
+
+    assert chat.status_code == 200
+    assert responses.status_code == 200
+    assert anthropic.status_code == 200
+    assert fake_client.payloads[0]["model"] == "gpt-5.4"
+    assert fake_client.payloads[0]["reasoning"]["effort"] == "high"
+    assert fake_client.payloads[0]["service_tier"] == "priority"
+    assert fake_client.payloads[1]["reasoning"] == {"effort": "low", "summary": "detailed"}
+    assert "service_tier" not in fake_client.payloads[1]
+    assert fake_client.payloads[2]["model"] == "gpt-5.4"
+    assert fake_client.payloads[2]["reasoning"]["effort"] == "high"
+    assert anthropic.json()["model"] == "claude-sonnet-5-4"
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,15 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from codex_api_service.app import create_app
-from codex_api_service.config import AppConfig, ApiConfig, AuthConfig, CodexConfig, ServerConfig, UsageConfig
+from codex_api_service.config import (
+    AppConfig,
+    ApiConfig,
+    AuthConfig,
+    CodexConfig,
+    ModelRequestDefaults,
+    ServerConfig,
+    UsageConfig,
+)
 
 
 class AdminFakeCodexClient:
@@ -81,6 +89,57 @@ async def test_admin_config_returns_safe_snapshot_without_secret(tmp_path: Path)
     assert body["codex"]["reasoning_effort"] == "medium"
     assert body["codex"]["fast_mode"] is True
     assert body["usage"]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_admin_config_returns_and_migrates_model_request_defaults(tmp_path: Path) -> None:
+    """验证管理接口返回按模型配置，保存时删除旧全局字段。"""
+    (tmp_path / "config.yaml").write_text(
+        "codex:\n  default_model: gpt-5.5\n  reasoning_effort: high\n  fast_mode: true\n",
+        encoding="utf-8",
+    )
+    app = create_app(config=make_admin_config(tmp_path), codex_client=AdminFakeCodexClient())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.patch(
+            "/admin/config",
+            json={
+                "codex": {
+                    "model_request_defaults": {
+                        "gpt-5.4": {"reasoning_effort": "high", "fast_mode": True},
+                        "gpt-5.5": {"reasoning_effort": "medium", "fast_mode": False},
+                    }
+                }
+            },
+        )
+        snapshot = await client.get("/admin/config")
+
+    assert response.status_code == 200
+    saved = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+    assert "model_request_defaults:" in saved
+    assert "gpt-5.4:" in saved
+    assert "reasoning_effort: high" in saved
+    assert "gpt-5.5:" not in saved
+    assert "\n  fast_mode:" not in saved
+    assert snapshot.json()["codex"]["model_request_defaults"] == {
+        "gpt-5.4": {"reasoning_effort": "high", "fast_mode": True}
+    }
+    assert snapshot.json()["codex"]["uses_legacy_request_defaults"] is False
+
+
+@pytest.mark.asyncio
+async def test_admin_config_rejects_invalid_model_request_defaults(tmp_path: Path) -> None:
+    """验证管理接口把非法按模型配置转换为 400。"""
+    app = create_app(config=make_admin_config(tmp_path), codex_client=AdminFakeCodexClient())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.patch(
+            "/admin/config",
+            json={"codex": {"model_request_defaults": []}},
+        )
+
+    assert response.status_code == 400
+    assert "model_request_defaults" in response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio

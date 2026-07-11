@@ -63,8 +63,10 @@ api:
 
 codex:
   default_model: gpt-5.5
-  reasoning_effort: medium
-  fast_mode: true
+  model_request_defaults:
+    gpt-5.5:
+      reasoning_effort: high
+      fast_mode: true
 
 usage:
   enabled: true
@@ -237,8 +239,9 @@ http://127.0.0.1:1219/ui
 
 - 聊天：直接用本服务的 `/v1/chat/completions` 流式聊天。
 - 请求日志：查看最近请求的接口、模型、状态、耗时和 token 用量，支持筛选和展开详情。
-- 配置：编辑常用 `config.yaml` 字段；模型和 reasoning effort 会从 Codex CLI 动态目录下拉选择，fast、usage 和 API key 可立即生效。
-- 状态条：展示 OAuth、Fast、usage 写入和 Codex CLI 版本状态。
+- 配置：编辑默认模型、usage、认证路径和 API key。
+- 模型配置：按 Codex CLI 动态目录为每个真实模型设置默认 reasoning effort 和快速模式。
+- 状态条：展示 OAuth、模型请求配置、usage 写入和 Codex CLI 版本状态。
 
 聊天区支持 Markdown fenced code block 展示和代码块复制。
 
@@ -251,8 +254,9 @@ npm --prefix frontend run build
 
 ## OpenAI SDK 示例
 
-默认开启 Codex Fast service tier。请求体不传快速模式参数时使用 `config.yaml` 的 `codex.fast_mode`；
-请求体可以用 `fast_mode` 临时覆盖，也可以直接传 `service_tier="fast"`。
+调用方未显式传参时，服务使用 `codex.model_request_defaults` 中对应真实模型的缺省值；未配置的模型固定使用
+`reasoning_effort="medium"` 且关闭快速模式。请求体可以用 `reasoning_effort`、`reasoning.effort`、
+`fast_mode` 或 `service_tier` 临时覆盖模型缺省值。
 服务会把快速模式映射成当前 Codex OAuth backend 可用的 `service_tier="priority"`。
 
 兼容层会接收 OpenAI SDK 常见参数，例如 `temperature`、`top_p`、`max_tokens`、
@@ -271,7 +275,7 @@ client = OpenAI(
 response = client.chat.completions.create(
     model="gpt-5.5",
     messages=[{"role": "user", "content": "你好，介绍一下你自己"}],
-    extra_body={"fast_mode": False},  # 临时关闭 Fast；不填则使用 config.yaml 默认值。
+    extra_body={"fast_mode": False},  # 显式参数优先；不填则使用该模型的 Web/YAML 缺省值。
 )
 
 print(response.choices[0].message.content)
