@@ -31,7 +31,7 @@ pip install -e ".[dev]"
 
 ## Codex OAuth
 
-服务会优先使用本服务 auth 文件；如果没有，会自动导入已有 Codex OAuth 文件，默认位置是 `~/.codex/auth.json`。
+服务会把多个账号隔离保存在项目的 `.codex-oauth/` 目录，并自动导入已有 Codex OAuth 文件，默认位置是 `~/.codex/auth.json`。同步时按凭据中的真实账号标识归档，不会用当前 CLI 账号覆盖另一个项目账号。
 
 你可以先完成 Codex 登录：
 
@@ -39,7 +39,9 @@ pip install -e ".[dev]"
 codex
 ```
 
-如果本机没有可用 token，首次 API 调用会触发浏览器 OAuth 登录流程。
+也可以在 Web 控制台的“OAuth 账号”页直接发起浏览器登录或设备码登录。OAuth 目录已被 Git 忽略，认证文件只允许当前用户读写。
+
+普通请求会根据套餐、5 小时剩余额度和重置时间进行平滑加权调度。Pro 系数为 `1.0`，Plus、Business 和未知套餐系数为 `0.05`。带 `previous_response_id` 的响应链固定使用原账号。
 
 ## 配置
 
@@ -78,9 +80,16 @@ usage:
   api_surface: chatgpt-codex-responses
 
 auth:
-  auth_path:
   import_auth_path:
+  account_store_path: .codex-oauth
+
+concurrency:
+  global_max:
+  queue_timeout_seconds: 600
 ```
+
+每个账号还可以在“OAuth 账号”页单独设置最大并发数。全局和账号并发默认均不限制；达到上限后请求最多排队 600 秒。
+“配置”页的账户调度策略可以切换单账户或多账户模式，启停状态会与“OAuth 账号”页同步；“账户并发负载”页每秒展示各账号实时并发和等待队列数量。
 
 也可以用环境变量临时设置本地 API key：
 

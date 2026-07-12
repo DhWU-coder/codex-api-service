@@ -17,6 +17,8 @@ import {
   SlidersHorizontal,
   Sun,
   Square,
+  Users,
+  X,
   Zap
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -29,6 +31,13 @@ import {
   fetchDashboardSummary,
   fetchAdminModels,
   fetchRequestLogs,
+  fetchOAuthAccounts,
+  saveOAuthDispatch,
+  syncOAuthAccounts,
+  updateOAuthAccount,
+  deleteOAuthAccount,
+  startOAuthLogin,
+  fetchOAuthLoginStatus,
   parseChatStreamLine,
   reloadCodexAuth,
   saveAdminConfig
@@ -58,12 +67,15 @@ import type {
   ChatUsage,
   CodexUsageRateLimit,
   CodexUsageSnapshot,
+  OAuthAccountsSnapshot,
+  OAuthAccountSnapshot,
+  OAuthLoginSession,
   ModelRequestConfigRow,
   RequestLogItem
 } from "./types";
 
 // 顶部导航标签的枚举，保持状态值简短稳定。
-type ActiveTab = "dashboard" | "chat" | "logs" | "config" | "model-config" | "usage-status";
+type ActiveTab = "dashboard" | "chat" | "logs" | "config" | "model-config" | "oauth-accounts" | "account-load" | "usage-status";
 
 // 控制台主题只提供明确的浅色和深色两种渲染结果。
 type ThemeMode = "light" | "dark";
@@ -89,9 +101,38 @@ type ConfigFormState = {
   localApiKeyTouched: boolean;
   defaultModel: string;
   usageEnabled: boolean;
-  authPath: string;
   importAuthPath: string;
+  globalMaxConcurrency: string;
+  queueTimeoutSeconds: string;
 };
+
+type AccountEditorState = {
+  mode: "rename" | "concurrency";
+  account: OAuthAccountSnapshot;
+  alias: string;
+  concurrencyMode: "unlimited" | "limited";
+  maxConcurrency: string;
+  saving: boolean;
+  error: string;
+};
+
+type DispatchEditorState = {
+  mode: "single" | "multi";
+  singleAccountKey: string;
+  enabledAccountKeys: string[];
+  saving: boolean;
+  error: string;
+};
+
+function accountLoadScale(snapshot: OAuthAccountsSnapshot): number {
+  // 统一刻度保证不同账号的负载条可以直接比较。
+  return Math.max(
+    5,
+    snapshot.globalMaxConcurrency || 0,
+    ...snapshot.accounts.map((account) => account.maxConcurrency || 0),
+    ...snapshot.accounts.map((account) => account.currentConcurrency)
+  );
+}
 
 // 生成前端本地消息 id，避免依赖服务端返回。
 function newId(prefix: string): string {
@@ -105,8 +146,9 @@ function formFromConfig(config: AdminConfig): ConfigFormState {
     localApiKeyTouched: false,
     defaultModel: config.codex.default_model,
     usageEnabled: config.usage.enabled,
-    authPath: config.auth.auth_path,
-    importAuthPath: config.auth.import_auth_path
+    importAuthPath: config.auth.import_auth_path,
+    globalMaxConcurrency: config.concurrency?.global_max == null ? "" : String(config.concurrency.global_max),
+    queueTimeoutSeconds: String(config.concurrency?.queue_timeout_seconds ?? 600)
   };
 }
 
@@ -458,6 +500,30 @@ function formatResetTime(timestamp: number): string {
   return new Date(timestamp * 1000).toLocaleString();
 }
 
+function formatDisplayWeight(weight: number): string {
+  // 把调度权重放大一千倍，并用普通十进制展示。
+  return new Intl.NumberFormat("zh-CN", {
+    maximumFractionDigits: 4,
+    useGrouping: false
+  }).format(weight * 1000);
+}
+
+function primaryUsageWindow(account: OAuthAccountSnapshot) {
+  // 读取账号主 5 小时额度窗口。
+  return account.usage?.rateLimit.windows.find((item) => item.kind === "primary");
+}
+
+function quotaTone(remainingPercent: number): "normal" | "warning" | "critical" {
+  // 额度低于不同阈值时使用更醒目的提示颜色。
+  if (remainingPercent < 5) {
+    return "critical";
+  }
+  if (remainingPercent < 10) {
+    return "warning";
+  }
+  return "normal";
+}
+
 function formatPlanType(planType: string): string {
   const normalized = planType.trim();
   if (!normalized) {
@@ -523,6 +589,11 @@ export function App() {
   const [codexUsage, setCodexUsage] = useState<CodexUsageSnapshot | null>(null);
   const [codexUsageError, setCodexUsageError] = useState("");
   const [isLoadingCodexUsage, setIsLoadingCodexUsage] = useState(false);
+  const [oauthAccounts, setOauthAccounts] = useState<OAuthAccountsSnapshot | null>(null);
+  const [isLoadingOauthAccounts, setIsLoadingOauthAccounts] = useState(false);
+  const [oauthLoginSession, setOauthLoginSession] = useState<OAuthLoginSession | null>(null);
+  const [accountEditor, setAccountEditor] = useState<AccountEditorState | null>(null);
+  const [dispatchEditor, setDispatchEditor] = useState<DispatchEditorState | null>(null);
   const [dashboardPreset, setDashboardPreset] = useState<DashboardRangePreset>("today");
   const [dashboardRecentDays, setDashboardRecentDays] = useState(7);
   const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary>(() =>
@@ -639,6 +710,142 @@ export function App() {
     }
   }, [apiKey]);
 
+  const loadOAuthAccounts = useCallback(async () => {
+    try {
+      setError("");
+      setIsLoadingOauthAccounts(true);
+      setOauthAccounts(await fetchOAuthAccounts(apiKey));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "OAuth 账号读取失败");
+    } finally {
+      setIsLoadingOauthAccounts(false);
+    }
+  }, [apiKey]);
+
+  const syncAccounts = useCallback(async () => {
+    try {
+      setError("");
+      setIsLoadingOauthAccounts(true);
+      setOauthAccounts(await syncOAuthAccounts(apiKey));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "OAuth 同步失败");
+    } finally {
+      setIsLoadingOauthAccounts(false);
+    }
+  }, [apiKey]);
+
+  const openDispatchEditor = useCallback(() => {
+    if (!oauthAccounts?.accounts.length) {
+      return;
+    }
+    const firstEnabled = oauthAccounts.accounts.find((account) => account.enabled);
+    setDispatchEditor({
+      mode: oauthAccounts.dispatchMode,
+      singleAccountKey: oauthAccounts.singleAccountKey || firstEnabled?.key || oauthAccounts.accounts[0].key,
+      enabledAccountKeys: oauthAccounts.accounts.filter((account) => account.enabled).map((account) => account.key),
+      saving: false,
+      error: ""
+    });
+  }, [oauthAccounts]);
+
+  const saveDispatchEditor = useCallback(async () => {
+    if (!dispatchEditor || dispatchEditor.saving) {
+      return;
+    }
+    if (dispatchEditor.mode === "multi" && dispatchEditor.enabledAccountKeys.length === 0) {
+      setDispatchEditor({ ...dispatchEditor, error: "请至少启用一个账户" });
+      return;
+    }
+    if (dispatchEditor.mode === "single" && !dispatchEditor.singleAccountKey) {
+      setDispatchEditor({ ...dispatchEditor, error: "请选择一个账户" });
+      return;
+    }
+    setDispatchEditor({ ...dispatchEditor, saving: true, error: "" });
+    try {
+      const snapshot = await saveOAuthDispatch(
+        apiKey,
+        dispatchEditor.mode === "single"
+          ? { mode: "single", singleAccountKey: dispatchEditor.singleAccountKey }
+          : { mode: "multi", enabledAccountKeys: dispatchEditor.enabledAccountKeys }
+      );
+      setOauthAccounts(snapshot);
+      setDispatchEditor(null);
+    } catch (caught) {
+      setDispatchEditor({
+        ...dispatchEditor,
+        saving: false,
+        error: caught instanceof Error ? caught.message : "账户调度策略保存失败"
+      });
+    }
+  }, [apiKey, dispatchEditor]);
+
+  const beginOAuthLogin = useCallback(async (deviceAuth = false) => {
+    try {
+      setError("");
+      let session = await startOAuthLogin(apiKey, deviceAuth);
+      setOauthLoginSession(session);
+      // 登录最多等待十分钟；后端负责浏览器回调和临时目录清理。
+      for (let attempt = 0; attempt < 600 && session.status === "waiting"; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        session = await fetchOAuthLoginStatus(apiKey, session.id);
+        setOauthLoginSession(session);
+      }
+      if (session.status === "success") {
+        await loadOAuthAccounts();
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "OAuth 登录失败");
+    }
+  }, [apiKey, loadOAuthAccounts]);
+
+  useEffect(() => {
+    if (oauthLoginSession?.status !== "success") {
+      return;
+    }
+    // 成功提示只短暂保留，避免完成后的 CLI 日志长期占据账号列表上方。
+    const sessionId = oauthLoginSession.id;
+    const timeout = window.setTimeout(() => {
+      setOauthLoginSession((current) => current?.id === sessionId ? null : current);
+    }, 3000);
+    return () => window.clearTimeout(timeout);
+  }, [oauthLoginSession]);
+
+  const saveAccountEditor = useCallback(async () => {
+    if (!accountEditor || accountEditor.saving) {
+      return;
+    }
+    let patch: { alias: string } | { maxConcurrency: number | null };
+    if (accountEditor.mode === "rename") {
+      const alias = accountEditor.alias.trim();
+      if (!alias) {
+        setAccountEditor({ ...accountEditor, error: "账号别名不能为空" });
+        return;
+      }
+      patch = { alias };
+    } else if (accountEditor.concurrencyMode === "unlimited") {
+      patch = { maxConcurrency: null };
+    } else {
+      const limit = Number(accountEditor.maxConcurrency);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        setAccountEditor({ ...accountEditor, error: "最大并发数必须是正整数" });
+        return;
+      }
+      patch = { maxConcurrency: limit };
+    }
+    setAccountEditor({ ...accountEditor, saving: true, error: "" });
+    try {
+      const snapshot = await updateOAuthAccount(apiKey, accountEditor.account.key, patch);
+      setOauthAccounts(snapshot);
+      setAccountEditor(null);
+    } catch (caught) {
+      setAccountEditor({
+        ...accountEditor,
+        saving: false,
+        error: caught instanceof Error ? caught.message : "账号设置保存失败"
+      });
+    }
+  }, [accountEditor, apiKey]);
+
   // 配置加载成功后，同步默认模型和动态目录到聊天区。
   useEffect(() => {
     void loadConfig();
@@ -654,6 +861,16 @@ export function App() {
   useEffect(() => {
     void loadHealth();
   }, [loadHealth]);
+
+  useEffect(() => {
+    if (activeTab !== "account-load") {
+      return;
+    }
+    // 负载页可见时每秒读取实时并发，离开页面立即停止轮询。
+    void loadOAuthAccounts();
+    const interval = window.setInterval(() => void loadOAuthAccounts(), 1000);
+    return () => window.clearInterval(interval);
+  }, [activeTab, loadOAuthAccounts]);
 
   // 流式输出时自动滚动到最新消息。
   useEffect(() => {
@@ -808,8 +1025,11 @@ export function App() {
         },
         usage: { enabled: configForm.usageEnabled },
         auth: {
-          auth_path: configForm.authPath,
           import_auth_path: configForm.importAuthPath
+        },
+        concurrency: {
+          global_max: configForm.globalMaxConcurrency,
+          queue_timeout_seconds: configForm.queueTimeoutSeconds
         }
       });
       setConfigSavedNote(result.restart_required ? "已保存，重启服务后生效" : "已保存，已立即生效");
@@ -927,6 +1147,7 @@ export function App() {
     [config, configForm?.defaultModel, model, modelCatalog]
   );
   const chatReasoningOptions = useMemo(() => reasoningOptionsFor(modelOptions, model), [model, modelOptions]);
+  const oauthLoadScale = useMemo(() => oauthAccounts ? accountLoadScale(oauthAccounts) : 5, [oauthAccounts]);
 
   // 目录或配置变化时刷新模型配置行，但保留用户尚未保存的编辑。
   useEffect(() => {
@@ -1027,6 +1248,7 @@ export function App() {
               setActiveTab("config");
               void loadConfig();
               void loadModelCatalog();
+              void loadOAuthAccounts();
             }}
           >
             <Settings size={18} />
@@ -1048,10 +1270,28 @@ export function App() {
             onClick={() => {
               setActiveTab("usage-status");
               void loadCodexUsage();
+              void loadOAuthAccounts();
             }}
           >
             <Gauge size={18} />
             额度状态
+          </button>
+          <button
+            className={activeTab === "oauth-accounts" ? "active" : ""}
+            onClick={() => {
+              setActiveTab("oauth-accounts");
+              void loadOAuthAccounts();
+            }}
+          >
+            <Users size={18} />
+            OAuth 账号
+          </button>
+          <button
+            className={activeTab === "account-load" ? "active" : ""}
+            onClick={() => setActiveTab("account-load")}
+          >
+            <Activity size={18} />
+            账户并发负载
           </button>
         </nav>
 
@@ -1454,6 +1694,29 @@ export function App() {
               </div>
             </div>
 
+            <div className="dispatch-policy-card">
+              <div>
+                <span>账户调度策略</span>
+                <strong>
+                  {oauthAccounts?.dispatchMode === "single" ? "单账户模式" : "多账户模式"}
+                </strong>
+                <small>
+                  {oauthAccounts
+                    ? `已启用 ${oauthAccounts.accounts.filter((account) => account.enabled).length}/${oauthAccounts.accounts.length} 个账户`
+                    : "正在读取账户状态"}
+                </small>
+              </div>
+              <button
+                className="secondary-button"
+                aria-label="设置账户调度策略"
+                onClick={openDispatchEditor}
+                disabled={!oauthAccounts?.accounts.length}
+              >
+                <SlidersHorizontal size={16} />
+                设置
+              </button>
+            </div>
+
             {configForm ? (
               <div className="config-grid">
                 <label>
@@ -1492,17 +1755,33 @@ export function App() {
                   {modelCatalogError ? <small className="field-error">{modelCatalogError}</small> : null}
                 </label>
                 <label>
-                  <span>Auth path</span>
-                  <input
-                    value={configForm.authPath}
-                    onChange={(event) => setConfigForm({ ...configForm, authPath: event.target.value })}
-                  />
-                </label>
-                <label>
-                  <span>Import auth path</span>
+                  <span>Codex 登录同步来源</span>
                   <input
                     value={configForm.importAuthPath}
                     onChange={(event) => setConfigForm({ ...configForm, importAuthPath: event.target.value })}
+                  />
+                </label>
+                <label>
+                  <span>项目 OAuth 账号库</span>
+                  <input value={config?.auth.account_store_path || ".codex-oauth"} readOnly />
+                </label>
+                <label>
+                  <span>全局最大并发数</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={configForm.globalMaxConcurrency}
+                    placeholder="不限制"
+                    onChange={(event) => setConfigForm({ ...configForm, globalMaxConcurrency: event.target.value })}
+                  />
+                </label>
+                <label>
+                  <span>等待队列超时（秒）</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={configForm.queueTimeoutSeconds}
+                    onChange={(event) => setConfigForm({ ...configForm, queueTimeoutSeconds: event.target.value })}
                   />
                 </label>
                 <label className="toggle-line">
@@ -1630,6 +1909,225 @@ export function App() {
           </section>
         ) : null}
 
+        {activeTab === "oauth-accounts" ? (
+          <section className="panel" aria-label="OAuth 账号">
+            <header className="toolbar">
+              <div>
+                <h2>OAuth 账号</h2>
+                <p>管理项目账号库、账号并发和 Codex CLI 登录同步。</p>
+              </div>
+              <div className="toolbar-actions oauth-toolbar-actions">
+                <button className="secondary-button oauth-toolbar-button" onClick={() => void loadOAuthAccounts()} disabled={isLoadingOauthAccounts}>
+                  <RefreshCw size={16} />
+                  刷新
+                </button>
+                <button className="primary-button oauth-toolbar-button" onClick={() => void syncAccounts()} disabled={isLoadingOauthAccounts}>
+                  <KeyRound size={16} />
+                  同步当前登录
+                </button>
+                <button className="primary-button oauth-toolbar-button" onClick={() => void beginOAuthLogin(false)} disabled={oauthLoginSession?.status === "waiting"}>
+                  <Users size={16} />
+                  添加账号
+                </button>
+                <button className="secondary-button oauth-toolbar-button" onClick={() => void beginOAuthLogin(true)} disabled={oauthLoginSession?.status === "waiting"}>
+                  <KeyRound size={16} />
+                  设备码登录
+                </button>
+              </div>
+            </header>
+
+            {oauthLoginSession ? (
+              <div className={`banner ${oauthLoginSession.status === "failed" ? "error" : ""}`}>
+                <KeyRound size={18} />
+                <div>
+                  <strong>{oauthLoginSession.message}</strong>
+                  {oauthLoginSession.status === "waiting"
+                    ? oauthLoginSession.output.map((line) => <div key={line}>{line}</div>)
+                    : null}
+                </div>
+              </div>
+            ) : null}
+
+            {oauthAccounts?.accounts?.length ? (
+              <div className="oauth-account-list">
+                {oauthAccounts.accounts.map((account) => {
+                  const primaryWindow = primaryUsageWindow(account);
+                  const protectedSingleAccount =
+                    oauthAccounts.dispatchMode === "single" && oauthAccounts.singleAccountKey === account.key;
+                  const protectedLastMultiAccount =
+                    oauthAccounts.dispatchMode === "multi"
+                    && account.enabled
+                    && oauthAccounts.accounts.filter((item) => item.enabled).length === 1;
+                  const cannotDisable = protectedSingleAccount || protectedLastMultiAccount;
+                  return (
+                  <article className="oauth-account-card" key={account.key}>
+                    <div className="oauth-account-head">
+                      <div>
+                        <h3>{account.alias}</h3>
+                        <p>{formatPlanType(account.usage?.planType || "未知套餐")} · {account.source}</p>
+                      </div>
+                      <span className={`status-badge ${account.status === "available" ? "ok" : "warning"}`}>
+                        {account.enabled ? account.status : "已停用"}
+                      </span>
+                    </div>
+                    <div className="oauth-account-metrics">
+                      <span><span className="metric-label">并发上限</span><strong>{account.maxConcurrency ?? "不限制"}</strong></span>
+                      <span><span className="metric-label">权重</span><strong>{formatDisplayWeight(account.weight)}</strong></span>
+                      <span><span className="metric-label">预计占比</span><strong>{Math.round(account.estimatedShare * 100)}%</strong></span>
+                      <span><span className="metric-label">5h 剩余</span><strong>{primaryWindow?.remainingPercent ?? "-"}%</strong></span>
+                      <span><span className="metric-label">5h 重置</span><strong>{formatResetTime(primaryWindow?.resetAt || 0)}</strong></span>
+                    </div>
+                    {account.lastError ? <div className="field-error">{account.lastError}</div> : null}
+                    <div className="oauth-account-footer">
+                      {primaryWindow ? (
+                        <div className="oauth-quota-visual">
+                          <div className="oauth-quota-visual-head">
+                            <span>5h 剩余额度</span>
+                            <strong>{primaryWindow.remainingPercent}%</strong>
+                          </div>
+                          <div
+                            className={`oauth-quota-track ${quotaTone(primaryWindow.remainingPercent)}`}
+                            role="progressbar"
+                            aria-label={`${account.alias} 5h 剩余额度`}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={primaryWindow.remainingPercent}
+                          >
+                            <span style={{ width: `${Math.max(0, Math.min(100, primaryWindow.remainingPercent))}%` }} />
+                          </div>
+                        </div>
+                      ) : null}
+                      <div className="oauth-account-actions">
+                      <button
+                        className="secondary-button"
+                        onClick={() => setAccountEditor({
+                          mode: "rename",
+                          account,
+                          alias: account.alias,
+                          concurrencyMode: account.maxConcurrency == null ? "unlimited" : "limited",
+                          maxConcurrency: account.maxConcurrency?.toString() || "",
+                          saving: false,
+                          error: ""
+                        })}
+                      >重命名</button>
+                      <button
+                        className="secondary-button"
+                        onClick={() => setAccountEditor({
+                          mode: "concurrency",
+                          account,
+                          alias: account.alias,
+                          concurrencyMode: account.maxConcurrency == null ? "unlimited" : "limited",
+                          maxConcurrency: account.maxConcurrency?.toString() || "1",
+                          saving: false,
+                          error: ""
+                        })}
+                      >并发设置</button>
+                      <button
+                        className="secondary-button"
+                        disabled={cannotDisable && account.enabled}
+                        title={cannotDisable && account.enabled ? "至少需要保留一个启用账户" : undefined}
+                        onClick={async () => setOauthAccounts(await updateOAuthAccount(apiKey, account.key, { enabled: !account.enabled }))}
+                      >{account.enabled ? "停用" : "启用"}</button>
+                      <button className="secondary-button" onClick={() => void beginOAuthLogin(false)}>重新登录</button>
+                      <button
+                        className="danger-button"
+                        disabled={protectedSingleAccount}
+                        title={protectedSingleAccount ? "请先选择其他单账户" : undefined}
+                        onClick={async () => {
+                          if (window.confirm(`确认删除 ${account.alias}？`)) setOauthAccounts(await deleteOAuthAccount(apiKey, account.key));
+                        }}
+                      >删除</button>
+                      </div>
+                    </div>
+                  </article>
+                  );
+                })}
+              </div>
+            ) : !isLoadingOauthAccounts ? (
+              <div className="empty-state">
+                <Users size={28} />
+                <h3>还没有 OAuth 账号</h3>
+                <p>先在 Codex CLI/App 登录，然后点击“添加 / 同步当前登录”。</p>
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
+        {activeTab === "account-load" ? (
+          <section className="panel" aria-label="账户并发负载">
+            <header className="toolbar">
+              <div>
+                <h2>账户并发负载</h2>
+                <p>每秒刷新账号实时请求数和全局等待队列。</p>
+              </div>
+              <button className="secondary-button" onClick={() => void loadOAuthAccounts()} disabled={isLoadingOauthAccounts}>
+                <RefreshCw size={16} />
+                刷新
+              </button>
+            </header>
+
+            {oauthAccounts ? (
+              <div className="account-load-page">
+                <div className="account-load-summary">
+                  <div><span>全局当前并发</span><strong>{oauthAccounts.globalCurrentConcurrency}</strong></div>
+                  <div><span>全局并发上限</span><strong>{oauthAccounts.globalMaxConcurrency ?? "不限制"}</strong></div>
+                  <div><span>等待队列</span><strong>{oauthAccounts.waitingQueueSize}</strong></div>
+                  <div><span>调度模式</span><strong>{oauthAccounts.dispatchMode === "single" ? "单账户" : "多账户"}</strong></div>
+                </div>
+                <div className="account-load-chart" aria-label="账户实时并发条形图">
+                  {oauthAccounts.accounts.map((account) => {
+                    const capacity = account.maxConcurrency ?? account.currentConcurrency;
+                    const primaryWindow = primaryUsageWindow(account);
+                    const capacityPercent = Math.min(100, capacity / oauthLoadScale * 100);
+                    const activePercent = capacity > 0
+                      ? Math.min(100, account.currentConcurrency / capacity * 100)
+                      : 0;
+                    return (
+                      <article className={`account-load-row ${account.enabled ? "" : "disabled"}`} key={account.key}>
+                      <div className="account-load-label">
+                        <strong>{account.alias}</strong>
+                        <small>
+                          {formatPlanType(account.usage?.planType || "未知套餐")} · {account.enabled ? account.status : "已停用"}
+                        </small>
+                        <small className="account-load-quota">
+                          5h 剩余额度：{primaryWindow ? `${primaryWindow.remainingPercent}%` : "-"}
+                        </small>
+                        <small className="account-load-reset">
+                          重置：{primaryWindow ? formatResetTime(primaryWindow.resetAt) : "-"}
+                        </small>
+                      </div>
+                      <div className="account-load-scale">
+                        <div
+                          className="account-load-capacity"
+                          aria-label={`${account.alias} 并发容量`}
+                          style={{ width: `${capacityPercent}%` }}
+                        >
+                          <div className="account-load-track">
+                            <span
+                              aria-label={`${account.alias} 当前并发`}
+                              style={{ width: `${activePercent}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                      <strong className="account-load-value">
+                        {account.currentConcurrency} / {account.maxConcurrency ?? "不限制"}
+                      </strong>
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : !isLoadingOauthAccounts ? (
+              <div className="empty-state">
+                <Activity size={28} />
+                <h3>并发负载未加载</h3>
+                <p>刷新后查看账号实时请求数。</p>
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
         {activeTab === "usage-status" ? (
           <section className="panel" aria-label="额度状态">
             <header className="toolbar">
@@ -1650,7 +2148,27 @@ export function App() {
               </div>
             ) : null}
 
-            {codexUsage ? (
+            {oauthAccounts?.accounts?.some((account) => account.usage) ? (
+              <div className="codex-usage-page">
+                <section className="codex-usage-summary">
+                  <div><span>启用账号</span><strong>{oauthAccounts.accounts.filter((item) => item.enabled).length}</strong></div>
+                  <div><span>可调度账号</span><strong>{oauthAccounts.accounts.filter((item) => item.enabled && item.status === "available").length}</strong></div>
+                  <div><span>全局当前并发</span><strong>{oauthAccounts.globalCurrentConcurrency}</strong></div>
+                </section>
+                {oauthAccounts.accounts.filter((account) => account.usage).map((account) => (
+                  <section className="codex-additional-limits" key={account.key}>
+                    <div className="oauth-account-head">
+                      <div><h3>{account.alias}</h3><p><strong>{formatPlanType(account.usage?.planType || "-")}</strong> · 预计占比 {Math.round(account.estimatedShare * 100)}%</p></div>
+                      <span className="status-badge ok">{account.status}</span>
+                    </div>
+                    {account.usage ? <UsageLimitCard title="Codex 主额度" rateLimit={account.usage.rateLimit} /> : null}
+                    {account.usage?.additionalRateLimits.map((item) => (
+                      <UsageLimitCard key={item.meteredFeature || item.limitName} title={item.limitName} rateLimit={item.rateLimit} />
+                    ))}
+                  </section>
+                ))}
+              </div>
+            ) : codexUsage ? (
               <div className="codex-usage-page">
                 <section className="codex-usage-summary">
                   <div>
@@ -1687,6 +2205,224 @@ export function App() {
           </section>
         ) : null}
       </main>
+
+      {dispatchEditor && oauthAccounts ? (
+        <div
+          className="account-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !dispatchEditor.saving) {
+              setDispatchEditor(null);
+            }
+          }}
+        >
+          <form
+            className="account-modal dispatch-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="dispatch-modal-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveDispatchEditor();
+            }}
+          >
+            <div className="account-modal-head">
+              <div>
+                <span className="account-modal-eyebrow">OAuth 请求路由</span>
+                <h2 id="dispatch-modal-title">设置账户调度策略</h2>
+              </div>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="关闭弹窗"
+                onClick={() => setDispatchEditor(null)}
+                disabled={dispatchEditor.saving}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="account-modal-body">
+              <div className="dispatch-mode-options">
+                <label className={dispatchEditor.mode === "single" ? "selected" : ""}>
+                  <input
+                    type="radio"
+                    name="dispatch-mode"
+                    aria-label="单账户模式"
+                    checked={dispatchEditor.mode === "single"}
+                    onChange={() => setDispatchEditor({ ...dispatchEditor, mode: "single", error: "" })}
+                  />
+                  <span><strong>单账户模式</strong><small>所有新请求固定使用一个账户。</small></span>
+                </label>
+                <label className={dispatchEditor.mode === "multi" ? "selected" : ""}>
+                  <input
+                    type="radio"
+                    name="dispatch-mode"
+                    aria-label="多账户模式"
+                    checked={dispatchEditor.mode === "multi"}
+                    onChange={() => setDispatchEditor({ ...dispatchEditor, mode: "multi", error: "" })}
+                  />
+                  <span><strong>多账户模式</strong><small>在启用账户之间按额度权重调度。</small></span>
+                </label>
+              </div>
+
+              {dispatchEditor.mode === "single" ? (
+                <label className="account-modal-field">
+                  <span>选择唯一账户</span>
+                  <select
+                    aria-label="单账户选择"
+                    value={dispatchEditor.singleAccountKey}
+                    onChange={(event) => setDispatchEditor({ ...dispatchEditor, singleAccountKey: event.target.value, error: "" })}
+                  >
+                    {oauthAccounts.accounts.map((account) => (
+                      <option value={account.key} key={account.key}>{account.alias}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <div className="dispatch-account-list">
+                  {oauthAccounts.accounts.map((account) => {
+                    const checked = dispatchEditor.enabledAccountKeys.includes(account.key);
+                    return (
+                      <label key={account.key}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => setDispatchEditor({
+                            ...dispatchEditor,
+                            enabledAccountKeys: event.target.checked
+                              ? [...dispatchEditor.enabledAccountKeys, account.key]
+                              : dispatchEditor.enabledAccountKeys.filter((key) => key !== account.key),
+                            error: ""
+                          })}
+                        />
+                        <span><strong>{account.alias}</strong><small>{formatPlanType(account.usage?.planType || "未知套餐")}</small></span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+              {dispatchEditor.error ? <div className="account-modal-error">{dispatchEditor.error}</div> : null}
+            </div>
+
+            <div className="account-modal-actions">
+              <button className="secondary-button" type="button" onClick={() => setDispatchEditor(null)} disabled={dispatchEditor.saving}>
+                取消
+              </button>
+              <button className="primary-button" type="submit" disabled={dispatchEditor.saving}>
+                {dispatchEditor.saving ? "保存中" : "保存策略"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {accountEditor ? (
+        <div
+          className="account-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !accountEditor.saving) {
+              setAccountEditor(null);
+            }
+          }}
+        >
+          <form
+            className="account-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="account-modal-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveAccountEditor();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !accountEditor.saving) {
+                setAccountEditor(null);
+              }
+            }}
+          >
+            <div className="account-modal-head">
+              <div>
+                <span className="account-modal-eyebrow">{accountEditor.account.alias}</span>
+                <h2 id="account-modal-title">
+                  {accountEditor.mode === "rename" ? "重命名 OAuth 账号" : "设置账号并发"}
+                </h2>
+              </div>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="关闭弹窗"
+                onClick={() => setAccountEditor(null)}
+                disabled={accountEditor.saving}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="account-modal-body">
+              {accountEditor.mode === "rename" ? (
+                <label className="account-modal-field">
+                  <span>账号别名</span>
+                  <input
+                    autoFocus
+                    aria-label="账号别名"
+                    value={accountEditor.alias}
+                    onFocus={(event) => event.currentTarget.select()}
+                    onChange={(event) => setAccountEditor({ ...accountEditor, alias: event.target.value, error: "" })}
+                  />
+                  <small>用于控制台展示，不会改变 OAuth 账号身份。</small>
+                </label>
+              ) : (
+                <div className="account-concurrency-options">
+                  <label className={accountEditor.concurrencyMode === "unlimited" ? "selected" : ""}>
+                    <input
+                      type="radio"
+                      aria-label="不限制并发"
+                      name="concurrency-mode"
+                      checked={accountEditor.concurrencyMode === "unlimited"}
+                      onChange={() => setAccountEditor({ ...accountEditor, concurrencyMode: "unlimited", error: "" })}
+                    />
+                    <span><strong>不限制并发</strong><small>账号可按调度权重接收任意数量请求。</small></span>
+                  </label>
+                  <label className={accountEditor.concurrencyMode === "limited" ? "selected" : ""}>
+                    <input
+                      type="radio"
+                      aria-label="限制并发"
+                      name="concurrency-mode"
+                      checked={accountEditor.concurrencyMode === "limited"}
+                      onChange={() => setAccountEditor({ ...accountEditor, concurrencyMode: "limited", error: "" })}
+                    />
+                    <span><strong>限制并发</strong><small>达到上限后，请求会等待其他槽位。</small></span>
+                  </label>
+                  {accountEditor.concurrencyMode === "limited" ? (
+                    <label className="account-modal-field compact">
+                      <span>最大并发数</span>
+                      <input
+                        autoFocus
+                        aria-label="最大并发数"
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={accountEditor.maxConcurrency}
+                        onChange={(event) => setAccountEditor({ ...accountEditor, maxConcurrency: event.target.value, error: "" })}
+                      />
+                    </label>
+                  ) : null}
+                </div>
+              )}
+              {accountEditor.error ? <div className="account-modal-error">{accountEditor.error}</div> : null}
+            </div>
+
+            <div className="account-modal-actions">
+              <button className="secondary-button" type="button" onClick={() => setAccountEditor(null)} disabled={accountEditor.saving}>
+                取消
+              </button>
+              <button className="primary-button" type="submit" disabled={accountEditor.saving}>
+                {accountEditor.saving ? "保存中" : "保存修改"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </div>
   );
 }

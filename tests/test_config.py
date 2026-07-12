@@ -30,6 +30,34 @@ def test_load_config_uses_default_values_when_yaml_is_missing(tmp_path: Path) ->
     assert config.usage.provider == "openai-codex"
     assert config.usage.auth == "codex-oauth"
     assert config.usage.api_surface == "chatgpt-codex-responses"
+    assert config.auth.account_store_path == tmp_path / ".codex-oauth"
+    assert config.concurrency.global_max is None
+    assert config.concurrency.queue_timeout_seconds == 600
+
+
+def test_load_config_parses_multi_oauth_and_concurrency(tmp_path: Path) -> None:
+    """验证多账号目录和全局并发配置可以从 YAML 读取。"""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "auth:\n  account_store_path: secrets/oauth\nconcurrency:\n  global_max: 8\n  queue_timeout_seconds: 90\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(project_root=tmp_path, config_path=config_path)
+
+    assert config.auth.account_store_path == tmp_path / "secrets" / "oauth"
+    assert config.concurrency.global_max == 8
+    assert config.concurrency.queue_timeout_seconds == 90
+
+
+@pytest.mark.parametrize("value", [0, -1, "bad"])
+def test_load_config_rejects_invalid_global_concurrency(tmp_path: Path, value: object) -> None:
+    """验证全局并发限制必须为空或正整数。"""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"concurrency:\n  global_max: {value}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="concurrency.global_max"):
+        load_config(project_root=tmp_path, config_path=config_path)
 
 
 def test_load_config_merges_yaml_overrides(tmp_path: Path) -> None:
@@ -110,13 +138,13 @@ def test_load_config_uses_import_auth_path_name(tmp_path: Path) -> None:
     # 加载配置后，新字段应被解析成项目根目录下的绝对路径。
     config = load_config(project_root=tmp_path, config_path=config_path)
 
-    assert config.auth.auth_path == tmp_path / "local" / "auth.json"
+    assert not hasattr(config.auth, "auth_path")
     assert config.auth.import_auth_path == tmp_path / "shared" / "auth.json"
 
 
-def test_load_config_keeps_legacy_codex_cli_auth_path_alias(tmp_path: Path) -> None:
-    """验证旧配置名 codex_cli_auth_path 仍可兼容读取。"""
-    # 老配置不应该因为字段改名而立即失效。
+def test_load_config_ignores_legacy_codex_cli_auth_path_alias(tmp_path: Path) -> None:
+    """验证旧配置名 codex_cli_auth_path 不再映射到同步来源。"""
+    # 旧字段已明确停止兼容，避免多个路径语义继续混淆。
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "\n".join(
@@ -128,10 +156,10 @@ def test_load_config_keeps_legacy_codex_cli_auth_path_alias(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    # 旧字段会映射到新的 import_auth_path 语义。
+    # 未提供新字段时，同步来源应保持空值并由账号池使用默认 CLI 路径。
     config = load_config(project_root=tmp_path, config_path=config_path)
 
-    assert config.auth.import_auth_path == tmp_path / "legacy" / "auth.json"
+    assert config.auth.import_auth_path is None
 
 
 def test_load_config_parses_model_request_defaults(tmp_path: Path) -> None:

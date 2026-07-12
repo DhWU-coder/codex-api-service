@@ -35,7 +35,8 @@ export type AdminConfig = {
     uses_legacy_request_defaults: boolean;
   };
   usage: { enabled: boolean; path: string };
-  auth: { auth_path: string; import_auth_path: string };
+  auth: { import_auth_path: string; account_store_path?: string };
+  concurrency?: { global_max: number | null; queue_timeout_seconds: number };
   config_path: string;
 };
 
@@ -121,6 +122,40 @@ export type CodexUsageSnapshot = {
     overageLimitReached: boolean;
     balance: string;
   };
+};
+
+// 多 OAuth 账号页面使用的脱敏账号运行快照。
+export type OAuthAccountSnapshot = {
+  key: string;
+  alias: string;
+  enabled: boolean;
+  source: string;
+  maxConcurrency: number | null;
+  currentConcurrency: number;
+  status: string;
+  lastError: string | null;
+  usage: CodexUsageSnapshot | null;
+  weight: number;
+  estimatedShare: number;
+  nextRefreshAt: number;
+};
+
+export type OAuthAccountsSnapshot = {
+  accounts: OAuthAccountSnapshot[];
+  dispatchMode: "single" | "multi";
+  singleAccountKey: string | null;
+  globalCurrentConcurrency: number;
+  globalMaxConcurrency: number | null;
+  waitingQueueSize: number;
+};
+
+export type OAuthLoginSession = {
+  id: string;
+  deviceAuth: boolean;
+  status: "waiting" | "success" | "failed" | "cancelled";
+  message: string;
+  output: string[];
+  accountKey: string | null;
 };
 
 // 请求日志列表中的单条元数据记录。

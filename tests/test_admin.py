@@ -49,12 +49,16 @@ def make_admin_config(tmp_path: Path, api_key: str | None = None) -> AppConfig:
         api=ApiConfig(local_api_key=api_key),
         codex=CodexConfig(default_model="gpt-5.5", reasoning_effort="medium"),
         usage=UsageConfig(path=tmp_path / ".codex-usage" / "usage.jsonl"),
-        auth=AuthConfig(auth_path=tmp_path / "auth.json", import_auth_path=tmp_path / "missing-auth.json"),
+        auth=AuthConfig(
+            import_auth_path=tmp_path / "missing-auth.json",
+            account_store_path=tmp_path / ".codex-oauth",
+        ),
     )
 
 
 def write_admin_auth_file(path: Path, *, expires: int) -> None:
     """写入管理台 health 测试用 OAuth 文件，不包含真实 token。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
@@ -89,6 +93,7 @@ async def test_admin_config_returns_safe_snapshot_without_secret(tmp_path: Path)
     assert body["codex"]["reasoning_effort"] == "medium"
     assert body["codex"]["fast_mode"] is True
     assert body["usage"]["enabled"] is True
+    assert "auth_path" not in body["auth"]
 
 
 @pytest.mark.asyncio
@@ -227,7 +232,7 @@ async def test_admin_health_reports_expired_oauth_file(tmp_path: Path) -> None:
     """验证 health 能区分 OAuth 文件存在和 token 已过期。"""
     # 过期的本服务 auth 文件不能再被视为完全可用。
     config = make_admin_config(tmp_path, api_key="local-secret")
-    write_admin_auth_file(config.auth.auth_path or (tmp_path / "auth.json"), expires=1)
+    write_admin_auth_file((config.auth.account_store_path or tmp_path / ".codex-oauth") / "single-account-auth.json", expires=1)
     app = create_app(config=config, codex_client=AdminFakeCodexClient())
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -245,7 +250,10 @@ async def test_admin_health_reports_expired_oauth_file(tmp_path: Path) -> None:
 async def test_admin_codex_usage_returns_safe_limit_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """验证管理台额度接口返回脱敏后的 Codex usage 摘要。"""
     config = make_admin_config(tmp_path, api_key="local-secret")
-    write_admin_auth_file(config.auth.auth_path or (tmp_path / "auth.json"), expires=4_102_444_800_000)
+    write_admin_auth_file(
+        (config.auth.account_store_path or tmp_path / ".codex-oauth") / "single-account-auth.json",
+        expires=4_102_444_800_000,
+    )
 
     async def fake_fetch_usage(*, client_version: str) -> dict[str, Any]:
         assert client_version
@@ -300,7 +308,10 @@ async def test_admin_codex_usage_reports_safe_upstream_error(
 ) -> None:
     """验证额度接口上游失败时不把敏感内容透传给前端。"""
     config = make_admin_config(tmp_path, api_key="local-secret")
-    write_admin_auth_file(config.auth.auth_path or (tmp_path / "auth.json"), expires=4_102_444_800_000)
+    write_admin_auth_file(
+        (config.auth.account_store_path or tmp_path / ".codex-oauth") / "single-account-auth.json",
+        expires=4_102_444_800_000,
+    )
 
     async def fake_fetch_usage(*, client_version: str) -> dict[str, Any]:
         raise RuntimeError("upstream failed with test-access")

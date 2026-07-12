@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Callable
@@ -36,6 +37,10 @@ class CodexCredentials:
     expires: int
     account_id: str | None = None
     id_token: str | None = None
+
+
+class OAuthLoginRequired(RuntimeError):
+    """表示账号凭据缺失或失效，需要显式重新登录。"""
 
 
 def default_auth_path() -> Path:
@@ -77,26 +82,29 @@ class CodexAuth:
         *,
         auth_path: Path | str | None = None,
         import_auth_path: Path | str | None = None,
-        codex_cli_auth_path: Path | str | None = None,
         open_browser: Callable[[str], bool] | None = None,
         input_func: Callable[[str], str] | None = None,
         refresh_func: Callable[[str], CodexCredentials] | None = None,
+        allow_import: bool = True,
+        allow_interactive_login: bool = True,
     ) -> None:
         """初始化认证管理器。"""
         self.auth_path = Path(auth_path) if auth_path is not None else default_auth_path()
-        # codex_cli_auth_path 是旧参数名，保留只是为了兼容已有调用方。
-        fallback_import_path = import_auth_path if import_auth_path is not None else codex_cli_auth_path
         self.import_auth_path = (
-            Path(fallback_import_path) if fallback_import_path is not None else default_import_auth_path()
+            Path(import_auth_path) if import_auth_path is not None else default_import_auth_path()
         )
         self.open_browser = open_browser or webbrowser.open
         self.input_func = input_func or input
         self.refresh_func = refresh_func or refresh_openai_codex_token
+        self.allow_import = allow_import
+        self.allow_interactive_login = allow_interactive_login
 
     def ensure_credentials(self) -> CodexCredentials:
         """确保存在未过期的 OAuth 凭据。"""
         credentials = self.load()
         if credentials is None:
+            if not self.allow_interactive_login:
+                raise OAuthLoginRequired("OAuth account requires login")
             credentials = self._login()
             self.save(credentials)
             return credentials
@@ -111,6 +119,8 @@ class CodexAuth:
                     self.save(imported)
                     return imported
                 self.logout()
+                if not self.allow_interactive_login:
+                    raise OAuthLoginRequired("OAuth account requires login") from error
                 credentials = self._login()
             self.save(credentials)
         return credentials
@@ -120,7 +130,7 @@ class CodexAuth:
         local = _parse_auth_file(self.auth_path)
         if local is not None:
             return local
-        imported = _parse_auth_file(self.import_auth_path)
+        imported = _parse_auth_file(self.import_auth_path) if self.allow_import else None
         if imported is not None:
             self.save(imported)
             return imported
@@ -128,6 +138,8 @@ class CodexAuth:
 
     def _load_valid_import_credentials(self) -> CodexCredentials | None:
         """读取仍可直接使用的导入凭据，用于本服务 refresh token 失效后的恢复。"""
+        if not self.allow_import:
+            return None
         imported = _parse_auth_file(self.import_auth_path)
         if imported is None or credentials_expired_or_near(imported):
             return None
@@ -283,7 +295,13 @@ def _parse_auth_file(path: Path) -> CodexCredentials | None:
 def _write_auth_file(path: Path, credentials: CodexCredentials) -> None:
     """以 0600 权限写入 auth.json。"""
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        existing = {}
     content = {
+        **(existing if isinstance(existing, dict) else {}),
+        "OPENAI_API_KEY": None,
         "auth_mode": "chatgpt",
         "tokens": {
             **({"id_token": credentials.id_token} if credentials.id_token else {}),
@@ -292,6 +310,7 @@ def _write_auth_file(path: Path, credentials: CodexCredentials) -> None:
             **({"account_id": credentials.account_id} if credentials.account_id else {}),
         },
         "expires": credentials.expires,
+        "last_refresh": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(content, indent=2) + "\n", encoding="utf-8")

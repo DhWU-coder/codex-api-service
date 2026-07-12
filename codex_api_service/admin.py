@@ -39,8 +39,12 @@ def safe_config_snapshot(config: AppConfig) -> dict[str, Any]:
         },
         "usage": {"enabled": config.usage.enabled, "path": str(config.usage.path)},
         "auth": {
-            "auth_path": str(config.auth.auth_path) if config.auth.auth_path else "",
             "import_auth_path": str(config.auth.import_auth_path) if config.auth.import_auth_path else "",
+            "account_store_path": str(config.auth.account_store_path) if config.auth.account_store_path else "",
+        },
+        "concurrency": {
+            "global_max": config.concurrency.global_max,
+            "queue_timeout_seconds": config.concurrency.queue_timeout_seconds,
         },
         "config_path": str(config.project_root / "config.yaml"),
     }
@@ -91,9 +95,20 @@ def patch_config_file(*, project_root: Path, patch: dict[str, Any]) -> dict[str,
     if isinstance(patch.get("auth"), dict):
         auth_patch = patch["auth"]
         auth_section = _ensure_section(current, "auth")
-        for field_name in ("auth_path", "import_auth_path"):
-            if field_name in auth_patch:
-                auth_section[field_name] = _empty_to_none(auth_patch[field_name])
+        if "import_auth_path" in auth_patch:
+            auth_section["import_auth_path"] = _empty_to_none(auth_patch["import_auth_path"])
+        # 保存新配置时顺手删除历史字段，避免它们继续误导人工维护。
+        auth_section.pop("auth_path", None)
+        auth_section.pop("codex_cli_auth_path", None)
+
+    if isinstance(patch.get("concurrency"), dict):
+        concurrency_patch = patch["concurrency"]
+        concurrency_section = _ensure_section(current, "concurrency")
+        if "global_max" in concurrency_patch:
+            value = concurrency_patch["global_max"]
+            concurrency_section["global_max"] = None if value in (None, "") else int(value)
+        if "queue_timeout_seconds" in concurrency_patch:
+            concurrency_section["queue_timeout_seconds"] = int(concurrency_patch["queue_timeout_seconds"])
 
     # safe_dump 会重写 YAML 格式，但内容简单可读，适合本地配置文件。
     config_path.write_text(

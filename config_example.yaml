@@ -31,10 +31,16 @@ codex:
   include_reasoning: true
 
 auth:
-  # 留空时默认使用 ~/.codex-api-service/auth.json 保存本服务 token。
-  auth_path:
   # 留空时默认从 ~/.codex/auth.json 导入已有 Codex OAuth 登录结果。
   import_auth_path:
+  # 多账号 OAuth 凭据保存在项目目录中；该目录默认被 Git 忽略。
+  account_store_path: .codex-oauth
+
+concurrency:
+  # 留空表示不限制全局并发；每账号并发在 Web 的 OAuth 账号页配置。
+  global_max:
+  # 所有可用账号满载时的最长等待秒数。
+  queue_timeout_seconds: 600
 
 usage:
   # 开启后，请求成功且上游返回真实 usage 时写入 codex-usage JSONL。

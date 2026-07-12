@@ -6,6 +6,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from codex_api_service.app import create_app
+from codex_api_service.auth import CodexCredentials
 from codex_api_service.codex_client import CodexHTTPStatusError, CodexUnexpectedResponseError
 from codex_api_service.config import (
     AppConfig,
@@ -17,6 +18,7 @@ from codex_api_service.config import (
     UsageConfig,
 )
 from codex_api_service.model_catalog import ModelCatalogEntry, ModelCatalogSnapshot
+from codex_api_service.oauth_scheduler import BoundAccountUnavailable
 
 
 class FakeCodexClient:
@@ -63,6 +65,19 @@ class FailingStreamCodexClient:
             400,
             '{"detail":"The gpt-5.5 model requires a newer version of Codex."}',
         )
+        yield {}
+
+
+class UnavailableBoundAccountClient:
+    """模拟 previous_response_id 所属账号已停用。"""
+
+    async def create_response(self, _payload: dict[str, Any]) -> dict[str, Any]:
+        """非流式请求返回稳定的绑定账号不可用错误。"""
+        raise BoundAccountUnavailable("previous_response_id 所属 OAuth 账户已停用，请不带 previous_response_id 发起新会话")
+
+    async def stream_response(self, _payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        """流式测试保持接口完整。"""
+        raise BoundAccountUnavailable("previous_response_id 所属 OAuth 账户已停用，请不带 previous_response_id 发起新会话")
         yield {}
 
 
@@ -181,6 +196,7 @@ def make_standard_test_config(tmp_path: Path) -> AppConfig:
 
 def write_oauth_file(path: Path, *, access: str, refresh: str, expires: int) -> None:
     """写入测试用 OAuth 文件，避免依赖真实本机登录。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
@@ -697,6 +713,74 @@ async def test_responses_service_tier_request_can_enable_fast_mode(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_responses_forwards_previous_response_id_for_account_stickiness(tmp_path: Path) -> None:
+    """验证响应链标识会进入账号池和上游 payload。"""
+    fake_client = FakeCodexClient()
+    app = create_app(config=make_standard_test_config(tmp_path), codex_client=fake_client)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.5", "input": "continue", "previous_response_id": "resp_previous"},
+        )
+
+    assert response.status_code == 200
+    assert fake_client.payloads[0]["previous_response_id"] == "resp_previous"
+
+
+@pytest.mark.asyncio
+async def test_unavailable_previous_response_account_returns_409_and_is_logged(tmp_path: Path) -> None:
+    """验证绑定账号停用会返回稳定错误，并出现在请求日志中。"""
+    app = create_app(config=make_test_config(tmp_path), codex_client=UnavailableBoundAccountClient())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.5", "input": "continue", "previous_response_id": "resp_old"},
+        )
+        logs = await client.get("/admin/requests")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "previous_response_account_unavailable"
+    assert "请不带 previous_response_id 发起新会话" in response.json()["error"]["message"]
+    assert logs.json()["items"][0]["status_code"] == 409
+    assert "previous_response_account_unavailable" in logs.json()["items"][0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_admin_oauth_dispatch_updates_mode_and_snapshot(tmp_path: Path) -> None:
+    """验证管理接口原子切换单账户模式并返回负载统计字段。"""
+    app = create_app(config=make_test_config(tmp_path))
+    pool = app.state.oauth_account_pool
+    pool._initialized = True
+    account_a = await pool.store.import_credentials(
+        CodexCredentials("access-a", "refresh-a", 4_102_444_800_000, "acct-a"),
+        source="web",
+    )
+    account_b = await pool.store.import_credentials(
+        CodexCredentials("access-b", "refresh-b", 4_102_444_800_000, "acct-b"),
+        source="web",
+    )
+    pool._rebuild_runtimes()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.put(
+            "/admin/oauth/dispatch",
+            json={"mode": "single", "singleAccountKey": account_b.key},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["dispatchMode"] == "single"
+    assert body["singleAccountKey"] == account_b.key
+    assert body["waitingQueueSize"] == 0
+    assert "globalMaxConcurrency" in body
+    enabled = {item["key"] for item in body["accounts"] if item["enabled"]}
+    assert enabled == {account_b.key}
+    assert account_a.key not in enabled
+
+
+@pytest.mark.asyncio
 async def test_responses_route_streams_sse_and_logs_final_usage(tmp_path: Path) -> None:
     """验证 /v1/responses 流式响应会转发 SSE 并记录最终 usage。"""
     # fake client 的 stream_response 会返回两个 delta 和一个 completed 事件。
@@ -742,7 +826,7 @@ async def test_local_api_key_is_required_when_configured(tmp_path: Path) -> None
 @pytest.mark.asyncio
 async def test_admin_auth_reload_imports_latest_codex_login(tmp_path: Path) -> None:
     """验证管理接口可以用 Codex CLI/App 的新登录覆盖本服务旧缓存。"""
-    local_auth = tmp_path / "service-auth.json"
+    local_auth = tmp_path / ".codex-oauth" / "single-account-auth.json"
     import_auth = tmp_path / "codex-auth.json"
     write_oauth_file(local_auth, access="old-access", refresh="old-refresh", expires=4_102_444_800_000)
     write_oauth_file(import_auth, access="fresh-access", refresh="fresh-refresh", expires=4_102_444_800_000)
@@ -751,7 +835,7 @@ async def test_admin_auth_reload_imports_latest_codex_login(tmp_path: Path) -> N
         server=ServerConfig(host="127.0.0.1", port=1219),
         codex=CodexConfig(default_model="gpt-5.5"),
         usage=UsageConfig(path=tmp_path / ".codex-usage" / "usage.jsonl"),
-        auth=AuthConfig(auth_path=local_auth, import_auth_path=import_auth),
+        auth=AuthConfig(import_auth_path=import_auth, account_store_path=tmp_path / ".codex-oauth"),
     )
     app = create_app(config=config, codex_client=FakeCodexClient())
 

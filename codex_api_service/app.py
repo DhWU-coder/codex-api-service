@@ -59,6 +59,7 @@ from .openai_compat import (
     normalize_responses_input,
     response_stream_event,
 )
+from .oauth_pool import OAuthAccountPool
 from .request_log import RequestLogStore
 from .request_policy import resolve_request_policy
 from .usage_log import UsageLogger
@@ -74,11 +75,14 @@ def create_app(
     """创建 FastAPI 应用，测试可注入 fake Codex client。"""
     # 未显式传入配置时，从当前项目根目录加载 config.yaml。
     app_config = config or load_config()
+    # 注入单客户端的场景也把认证文件落在项目账号库内，不再暴露旧路径配置。
+    account_store_path = app_config.auth.account_store_path or app_config.project_root / ".codex-oauth"
     auth = CodexAuth(
-        auth_path=app_config.auth.auth_path,
+        auth_path=account_store_path / "single-account-auth.json",
         import_auth_path=app_config.auth.import_auth_path,
     )
-    client = codex_client or CodexClient(auth=auth, config=app_config.codex)
+    account_pool = None if codex_client is not None else OAuthAccountPool(config=app_config)
+    client = codex_client or account_pool
     usage_logger = UsageLogger(project_root=app_config.project_root, usage_config=app_config.usage)
     request_log = RequestLogStore(
         path=app_config.project_root / "logs" / "requests.jsonl",
@@ -87,11 +91,30 @@ def create_app(
     catalog = model_catalog or CodexModelCatalog(config_getter=lambda: app_config, runner=model_catalog_runner)
     app = FastAPI(title="Codex OpenAI API Service", version="0.1.0")
 
+    if account_pool is not None:
+        @app.on_event("startup")
+        async def start_oauth_account_pool() -> None:
+            """服务启动时同步账号库并启动额度刷新任务。"""
+            await account_pool.ensure_initialized()
+
+        @app.on_event("shutdown")
+        async def stop_oauth_account_pool() -> None:
+            """服务退出时清理账号池后台任务和状态库。"""
+            await account_pool.close()
+
     @app.exception_handler(HTTPException)
     async def openai_http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
         """把 FastAPI HTTPException 统一转换成 OpenAI-compatible error envelope。"""
-        message = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail, ensure_ascii=False)
-        return JSONResponse(status_code=exc.status_code, content=_openai_error_payload(message, exc.status_code))
+        if isinstance(exc.detail, dict):
+            message = str(exc.detail.get("message") or json.dumps(exc.detail, ensure_ascii=False))
+            error_code = exc.detail.get("code") if isinstance(exc.detail.get("code"), str) else None
+        else:
+            message = str(exc.detail)
+            error_code = None
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_openai_error_payload(message, exc.status_code, error_code=error_code),
+        )
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -277,7 +300,12 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(error)) from error
         if result.get("applied") is True:
             app_config = load_config(project_root=app_config.project_root)
-            client.config = app_config.codex
+            if account_pool is None:
+                client.config = app_config.codex
+            else:
+                account_pool.config = app_config
+                account_pool.scheduler.global_max = app_config.concurrency.global_max
+                account_pool.scheduler.queue_timeout_seconds = app_config.concurrency.queue_timeout_seconds
             usage_logger.usage_config = app_config.usage
             app.state.config = app_config
         return result
@@ -308,6 +336,14 @@ def create_app(
     async def admin_auth_reload(request: Request) -> Any:
         """从 Codex CLI/App 登录文件重新导入 OAuth 凭据。"""
         _require_local_auth(request, app_config)
+        if account_pool is not None:
+            record = await account_pool.sync_global()
+            if record is None:
+                return JSONResponse(
+                    status_code=409,
+                    content={"oauth": {"available": False, "reloaded": False}, "message": "未找到新的 Codex 登录凭据"},
+                )
+            return {"oauth": {"available": True, "expired": False, "reloaded": True}}
         credentials = auth.reload_import_credentials()
         if credentials is None:
             return JSONResponse(
@@ -323,12 +359,146 @@ def create_app(
     async def admin_codex_usage(request: Request) -> dict[str, Any]:
         """返回当前 OAuth 账号的 Codex 额度状态。"""
         _require_local_auth(request, app_config)
+        if account_pool is not None:
+            await account_pool.ensure_initialized()
+            accounts = account_pool.snapshot()["accounts"]
+            usage = next((item.get("usage") for item in accounts if item.get("usage")), None)
+            if isinstance(usage, dict):
+                return usage
+            raise HTTPException(status_code=502, detail="Codex usage status unavailable")
         try:
             return await fetch_codex_usage_snapshot(client_version=_codex_client_version())
         except CodexUsageFetchError as error:
             raise HTTPException(status_code=502, detail="Codex usage status unavailable") from error
         except Exception as error:
             raise HTTPException(status_code=502, detail="Codex usage status unavailable") from error
+
+    @app.get("/admin/oauth/accounts")
+    async def admin_oauth_accounts(request: Request) -> dict[str, Any]:
+        """返回多 OAuth 账号和调度状态。"""
+        _require_local_auth(request, app_config)
+        if account_pool is None:
+            return {
+                "accounts": [],
+                "dispatchMode": "multi",
+                "singleAccountKey": None,
+                "globalCurrentConcurrency": 0,
+                "globalMaxConcurrency": None,
+                "waitingQueueSize": 0,
+            }
+        await account_pool.ensure_initialized()
+        return account_pool.snapshot()
+
+    @app.post("/admin/oauth/accounts/sync")
+    async def admin_oauth_accounts_sync(request: Request) -> dict[str, Any]:
+        """同步当前 Codex CLI/App 登录到正确项目账号。"""
+        _require_local_auth(request, app_config)
+        if account_pool is None:
+            raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
+        await account_pool.ensure_initialized()
+        record = await account_pool.sync_global()
+        return {"synced": record is not None, **account_pool.snapshot()}
+
+    @app.put("/admin/oauth/dispatch")
+    async def admin_oauth_dispatch_update(request: Request) -> dict[str, Any]:
+        """原子保存单账户或多账户调度策略。"""
+        _require_local_auth(request, app_config)
+        if account_pool is None:
+            raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
+        await account_pool.ensure_initialized()
+        body = await request.json()
+        enabled_keys = body.get("enabledAccountKeys")
+        try:
+            return await account_pool.set_dispatch(
+                mode=str(body.get("mode") or ""),
+                single_account_key=body.get("singleAccountKey") if isinstance(body.get("singleAccountKey"), str) else None,
+                enabled_account_keys=set(enabled_keys) if isinstance(enabled_keys, list) else None,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/admin/oauth/login")
+    async def admin_oauth_login_start(request: Request) -> dict[str, Any]:
+        """从 Web 发起隔离的浏览器或设备码 OAuth 登录。"""
+        _require_local_auth(request, app_config)
+        if account_pool is None:
+            raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
+        body = await request.json()
+        try:
+            return await account_pool.login.start(device_auth=bool(body.get("deviceAuth", False)))
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.get("/admin/oauth/login/{session_id}")
+    async def admin_oauth_login_status(session_id: str, request: Request) -> dict[str, Any]:
+        """读取 Web OAuth 登录进度。"""
+        _require_local_auth(request, app_config)
+        if account_pool is None:
+            raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
+        result = account_pool.login.status(session_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="OAuth login session not found")
+        if result["status"] == "success":
+            account_pool._rebuild_runtimes()
+        return result
+
+    @app.delete("/admin/oauth/login/{session_id}")
+    async def admin_oauth_login_cancel(session_id: str, request: Request) -> dict[str, Any]:
+        """取消正在进行的 Web OAuth 登录。"""
+        _require_local_auth(request, app_config)
+        if account_pool is None:
+            raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
+        result = await account_pool.login.cancel(session_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="OAuth login session not found")
+        return result
+
+    @app.patch("/admin/oauth/accounts/{account_key}")
+    async def admin_oauth_account_patch(account_key: str, request: Request) -> dict[str, Any]:
+        """更新账号别名、启停状态或账号并发上限。"""
+        _require_local_auth(request, app_config)
+        if account_pool is None:
+            raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
+        body = await request.json()
+        try:
+            await account_pool.store.update(
+                account_key,
+                alias=body.get("alias") if "alias" in body else None,
+                enabled=body.get("enabled") if "enabled" in body else None,
+                max_concurrency=body.get("maxConcurrency", ...) if "maxConcurrency" in body else ...,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="OAuth account not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        account_pool._rebuild_runtimes()
+        return account_pool.snapshot()
+
+    @app.delete("/admin/oauth/accounts/{account_key}")
+    async def admin_oauth_account_delete(account_key: str, request: Request) -> dict[str, Any]:
+        """删除项目账号及其本地认证文件。"""
+        _require_local_auth(request, app_config)
+        if account_pool is None:
+            raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
+        try:
+            await account_pool.store.delete(account_key)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="OAuth account not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        account_pool._rebuild_runtimes()
+        return account_pool.snapshot()
+
+    @app.post("/admin/oauth/accounts/{account_key}/refresh")
+    async def admin_oauth_account_refresh(account_key: str, request: Request) -> dict[str, Any]:
+        """立即刷新单个账号额度。"""
+        _require_local_auth(request, app_config)
+        if account_pool is None:
+            raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
+        usage = await account_pool.refresh_account(account_key)
+        if usage is None and account_pool.store.get(account_key) is None:
+            raise HTTPException(status_code=404, detail="OAuth account not found")
+        return account_pool.snapshot()
 
     @app.get("/admin/requests")
     async def admin_requests(request: Request, limit: str = "100") -> dict[str, Any]:
@@ -366,6 +536,7 @@ def create_app(
     # 保存配置和 client，便于调试或外部测试读取应用状态。
     app.state.config = app_config
     app.state.codex_client = client
+    app.state.oauth_account_pool = account_pool
     app.state.usage_logger = usage_logger
     app.state.request_log = request_log
     app.state.model_catalog = catalog
@@ -460,6 +631,9 @@ def _responses_body_to_codex_payload(body: dict[str, Any], config: AppConfig, mo
     payload["input"] = normalize_responses_input(body["input"])
     if isinstance(body.get("instructions"), str):
         payload["instructions"] = body["instructions"]
+    if isinstance(body.get("previous_response_id"), str) and body["previous_response_id"]:
+        # 响应链标识既用于账号粘性，也必须继续传给 Codex backend 恢复上下文。
+        payload["previous_response_id"] = body["previous_response_id"]
     return payload
 
 
@@ -525,15 +699,16 @@ async def _stream_chat_completion(
         # 流式响应已经开始后不能再改 HTTP 状态码，只能用 SSE error 事件优雅结束。
         message = _friendly_error_message(error)
         status_code = _error_status_code(error)
+        error_code = _error_code(error)
         request_log.record(
             method="POST",
             path="/v1/chat/completions",
             model=model,
             status_code=status_code,
             duration_ms=_duration_ms(started),
-            error=message,
+            error=f"{error_code}: {message}" if error_code else message,
         )
-        yield _stream_error_sse(message=message, status_code=status_code)
+        yield _stream_error_sse(message=message, status_code=status_code, error_code=error_code)
         yield "data: [DONE]\n\n"
         return
     if completed_response is not None:
@@ -574,15 +749,16 @@ async def _stream_response(
         # Responses API 流也保持 SSE 完整结束，避免客户端看到网络层断流。
         message = _friendly_error_message(error)
         status_code = _error_status_code(error)
+        error_code = _error_code(error)
         request_log.record(
             method="POST",
             path="/v1/responses",
             model=model,
             status_code=status_code,
             duration_ms=_duration_ms(started),
-            error=message,
+            error=f"{error_code}: {message}" if error_code else message,
         )
-        yield _stream_error_sse(message=message, status_code=status_code)
+        yield _stream_error_sse(message=message, status_code=status_code, error_code=error_code)
         yield "data: [DONE]\n\n"
         return
     if completed_response is not None:
@@ -708,25 +884,29 @@ def _raise_non_stream_error(
     # 非流式响应尚未发送，可以直接使用正确 HTTP 状态码和 JSON detail。
     message = _friendly_error_message(error)
     status_code = _error_status_code(error)
+    error_code = _error_code(error)
     request_log.record(
         method=method,
         path=path,
         model=model,
         status_code=status_code,
         duration_ms=_duration_ms(started),
-        error=message,
+        error=f"{error_code}: {message}" if error_code else message,
     )
-    raise HTTPException(status_code=status_code, detail=message)
+    raise HTTPException(
+        status_code=status_code,
+        detail={"message": message, "code": error_code} if error_code else message,
+    )
 
 
-def _openai_error_payload(message: str, status_code: int) -> dict[str, Any]:
+def _openai_error_payload(message: str, status_code: int, *, error_code: str | None = None) -> dict[str, Any]:
     """构造 OpenAI-compatible JSON 错误响应。"""
     return {
         "error": {
             "message": message,
-            "type": _openai_error_type(status_code),
+            "type": error_code or _openai_error_type(status_code),
             "param": None,
-            "code": None,
+            "code": error_code,
         }
     }
 
@@ -762,9 +942,17 @@ def _error_status_code(error: Exception) -> int:
     return 500
 
 
-def _stream_error_sse(*, message: str, status_code: int) -> str:
+def _error_code(error: Exception) -> str | None:
+    """读取供调用方稳定判断的本地错误码。"""
+    value = getattr(error, "error_code", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _stream_error_sse(*, message: str, status_code: int, error_code: str | None = None) -> str:
     """构造流式错误 SSE 事件。"""
-    return encode_sse({"error": {"message": message, "status_code": status_code}})
+    return encode_sse(
+        {"error": {"message": message, "status_code": status_code, **({"code": error_code} if error_code else {})}}
+    )
 
 
 def _duration_ms(started: float) -> int:

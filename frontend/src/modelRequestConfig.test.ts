@@ -19,7 +19,7 @@ function config(overrides: Partial<AdminConfig["codex"]> = {}): AdminConfig {
       ...overrides
     },
     usage: { enabled: true, path: ".codex-usage/usage.jsonl" },
-    auth: { auth_path: "", import_auth_path: "" },
+    auth: { import_auth_path: "" },
     config_path: "config.yaml"
   };
 }

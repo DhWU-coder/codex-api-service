@@ -84,9 +84,10 @@ usage:
   api_surface: chatgpt-codex-responses
 
 auth:
-  auth_path:
   import_auth_path:
 ```
+
+Use the account dispatch setting on the Configuration page to switch between single-account and multi-account routing. The OAuth Accounts page shares the same enabled state, and the Account Concurrency Load page refreshes active requests and queued tasks every second.
 
 You can also set the local API key with an environment variable:
 

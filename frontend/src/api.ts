@@ -5,7 +5,9 @@ import type {
   AuthReloadResult,
   CodexUsageSnapshot,
   ParsedChatStreamEvent,
-  RequestLogItem
+  RequestLogItem,
+  OAuthAccountsSnapshot,
+  OAuthLoginSession
 } from "./types";
 import type { DashboardRangePreset, DashboardSummary } from "./dashboard";
 
@@ -131,6 +133,91 @@ export async function fetchCodexUsage(apiKey: string): Promise<CodexUsageSnapsho
     throw new Error(`额度状态读取失败：${await responseErrorMessage(response)}`);
   }
   return (await response.json()) as CodexUsageSnapshot;
+}
+
+// 读取项目内全部 OAuth 账号及其脱敏调度状态。
+export async function fetchOAuthAccounts(apiKey: string): Promise<OAuthAccountsSnapshot> {
+  const response = await fetch("/admin/oauth/accounts", { headers: buildAuthHeaders(apiKey) });
+  if (!response.ok) {
+    throw new Error(`OAuth 账号读取失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as OAuthAccountsSnapshot;
+}
+
+// 把当前 Codex CLI/App 登录同步到真实账号对应的项目目录。
+export async function syncOAuthAccounts(apiKey: string): Promise<OAuthAccountsSnapshot> {
+  const response = await fetch("/admin/oauth/accounts/sync", {
+    method: "POST",
+    headers: buildAuthHeaders(apiKey)
+  });
+  if (!response.ok) {
+    throw new Error(`OAuth 同步失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as OAuthAccountsSnapshot;
+}
+
+export async function saveOAuthDispatch(
+  apiKey: string,
+  policy: { mode: "single"; singleAccountKey: string } | { mode: "multi"; enabledAccountKeys: string[] }
+): Promise<OAuthAccountsSnapshot> {
+  const response = await fetch("/admin/oauth/dispatch", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders(apiKey) },
+    body: JSON.stringify(policy)
+  });
+  if (!response.ok) {
+    throw new Error(`账户调度策略保存失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as OAuthAccountsSnapshot;
+}
+
+export async function updateOAuthAccount(
+  apiKey: string,
+  accountKey: string,
+  patch: unknown
+): Promise<OAuthAccountsSnapshot> {
+  const response = await fetch(`/admin/oauth/accounts/${encodeURIComponent(accountKey)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders(apiKey) },
+    body: JSON.stringify(patch)
+  });
+  if (!response.ok) {
+    throw new Error(`OAuth 账号保存失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as OAuthAccountsSnapshot;
+}
+
+export async function deleteOAuthAccount(apiKey: string, accountKey: string): Promise<OAuthAccountsSnapshot> {
+  const response = await fetch(`/admin/oauth/accounts/${encodeURIComponent(accountKey)}`, {
+    method: "DELETE",
+    headers: buildAuthHeaders(apiKey)
+  });
+  if (!response.ok) {
+    throw new Error(`OAuth 账号删除失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as OAuthAccountsSnapshot;
+}
+
+export async function startOAuthLogin(apiKey: string, deviceAuth = false): Promise<OAuthLoginSession> {
+  const response = await fetch("/admin/oauth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders(apiKey) },
+    body: JSON.stringify({ deviceAuth })
+  });
+  if (!response.ok) {
+    throw new Error(`OAuth 登录启动失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as OAuthLoginSession;
+}
+
+export async function fetchOAuthLoginStatus(apiKey: string, sessionId: string): Promise<OAuthLoginSession> {
+  const response = await fetch(`/admin/oauth/login/${encodeURIComponent(sessionId)}`, {
+    headers: buildAuthHeaders(apiKey)
+  });
+  if (!response.ok) {
+    throw new Error(`OAuth 登录状态读取失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as OAuthLoginSession;
 }
 
 // 读取 API 请求日志；limit=all 时用于本地看板全量统计。

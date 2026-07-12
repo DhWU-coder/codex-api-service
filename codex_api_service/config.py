@@ -83,8 +83,16 @@ class UsageConfig:
 class AuthConfig:
     """描述 Codex OAuth 凭据文件位置。"""
 
-    auth_path: Path | None = None
     import_auth_path: Path | None = None
+    account_store_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class ConcurrencyConfig:
+    """描述全局请求并发与等待队列配置。"""
+
+    global_max: int | None = None
+    queue_timeout_seconds: int = 600
 
 
 @dataclass(frozen=True)
@@ -97,6 +105,7 @@ class AppConfig:
     codex: CodexConfig = field(default_factory=CodexConfig)
     usage: UsageConfig | None = None
     auth: AuthConfig = field(default_factory=AuthConfig)
+    concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
 
     def __post_init__(self) -> None:
         """补齐依赖 project_root 的 usage 默认值。"""
@@ -168,17 +177,35 @@ def load_config(
         api_surface=str(_nested_get(raw_config, ["usage", "api_surface"], DEFAULT_USAGE_API_SURFACE)),
     )
 
-    # 认证路径可选；未配置时由 auth 模块按 Codex 默认规则解析。
-    import_auth_value = _nested_get(raw_config, ["auth", "import_auth_path"], None)
-    if import_auth_value is None:
-        # 兼容早期配置名；语义仍然是“导入已有 Codex OAuth 文件”。
-        import_auth_value = _nested_get(raw_config, ["auth", "codex_cli_auth_path"], None)
+    # 只保留 Codex 当前登录同步来源和项目账号库，不再读取旧单账号字段。
     auth = AuthConfig(
-        auth_path=_optional_path(root, _nested_get(raw_config, ["auth", "auth_path"], None)),
-        import_auth_path=_optional_path(root, import_auth_value),
+        import_auth_path=_optional_path(root, _nested_get(raw_config, ["auth", "import_auth_path"], None)),
+        account_store_path=_resolve_path(
+            root,
+            _nested_get(raw_config, ["auth", "account_store_path"], ".codex-oauth"),
+        ),
     )
 
-    return AppConfig(project_root=root, server=server, api=api, codex=codex, usage=usage, auth=auth)
+    concurrency = ConcurrencyConfig(
+        global_max=_positive_optional_int(
+            _nested_get(raw_config, ["concurrency", "global_max"], None),
+            field_name="concurrency.global_max",
+        ),
+        queue_timeout_seconds=_positive_int(
+            _nested_get(raw_config, ["concurrency", "queue_timeout_seconds"], 600),
+            field_name="concurrency.queue_timeout_seconds",
+        ),
+    )
+
+    return AppConfig(
+        project_root=root,
+        server=server,
+        api=api,
+        codex=codex,
+        usage=usage,
+        auth=auth,
+        concurrency=concurrency,
+    )
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -235,6 +262,26 @@ def _bool_value(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _positive_optional_int(value: Any, *, field_name: str) -> int | None:
+    """把空值或正整数解析成可选并发上限。"""
+    if value is None or value == "":
+        return None
+    return _positive_int(value, field_name=field_name)
+
+
+def _positive_int(value: Any, *, field_name: str) -> int:
+    """严格解析正整数配置。"""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a positive integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field_name} must be a positive integer") from error
+    if parsed <= 0 or str(value).strip() != str(parsed):
+        raise ValueError(f"{field_name} must be a positive integer")
+    return parsed
 
 
 def parse_model_request_defaults(value: Any) -> dict[str, ModelRequestDefaults]:

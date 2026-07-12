@@ -21,7 +21,7 @@ const adminConfig = {
     uses_legacy_request_defaults: false
   },
   usage: { enabled: true, path: ".codex-usage/usage.jsonl" },
-  auth: { auth_path: "~/.codex/auth.json", import_auth_path: "~/.codex/auth.json" },
+  auth: { import_auth_path: "~/.codex/auth.json" },
   config_path: "config.yaml"
 };
 
@@ -111,6 +111,31 @@ const codexUsageStatus = {
   credits: { hasCredits: false, unlimited: false, overageLimitReached: false, balance: "0" }
 };
 
+// OAuth 账号页测试数据覆盖权重、主额度重置时间和账号编辑操作。
+const oauthAccountsStatus = {
+  accounts: [
+    {
+      key: "account-a",
+      alias: "账号 A",
+      enabled: true,
+      source: "codex-cli",
+      maxConcurrency: null,
+      currentConcurrency: 2,
+      status: "available",
+      lastError: null,
+      usage: codexUsageStatus,
+      weight: 0.00338,
+      estimatedShare: 1,
+      nextRefreshAt: 1783815000
+    }
+  ],
+  dispatchMode: "multi",
+  singleAccountKey: null,
+  globalCurrentConcurrency: 2,
+  globalMaxConcurrency: null,
+  waitingQueueSize: 3
+};
+
 // 看板测试用的请求日志，模拟后端 /admin/requests 返回值。
 const requestLogItems = [
   {
@@ -146,6 +171,8 @@ describe("App theme mode", () => {
   let healthResponse = adminHealth;
   let modelCatalogResponse = adminModelCatalog;
   let requestLogsResponse = requestLogItems;
+  let oauthLoginStartResponse: Record<string, unknown> | null = null;
+  let oauthAccountsResponse = oauthAccountsStatus;
 
   beforeEach(() => {
     capturedRequests = [];
@@ -154,6 +181,8 @@ describe("App theme mode", () => {
     healthResponse = { ...adminHealth, oauth: { ...adminHealth.oauth } };
     modelCatalogResponse = adminModelCatalog;
     requestLogsResponse = requestLogItems;
+    oauthLoginStartResponse = null;
+    oauthAccountsResponse = oauthAccountsStatus;
 
     // 用内存版 localStorage 规避 jsdom 在当前环境里的存储实现差异。
     const memoryStorage = new Map<string, string>();
@@ -224,6 +253,20 @@ describe("App theme mode", () => {
         }
         if (url === "/admin/codex/usage") {
           return new Response(JSON.stringify(codexUsageStatus), { status: 200 });
+        }
+        if (url === "/admin/oauth/accounts") {
+          return new Response(JSON.stringify(oauthAccountsResponse), { status: 200 });
+        }
+        if (url === "/admin/oauth/accounts/account-a" && method === "PATCH") {
+          return new Response(JSON.stringify(oauthAccountsResponse), { status: 200 });
+        }
+        if (url === "/admin/oauth/dispatch" && method === "PUT") {
+          return new Response(JSON.stringify({ ...oauthAccountsStatus, dispatchMode: "single", singleAccountKey: "account-a" }), {
+            status: 200
+          });
+        }
+        if (url === "/admin/oauth/login" && method === "POST" && oauthLoginStartResponse) {
+          return new Response(JSON.stringify(oauthLoginStartResponse), { status: 200 });
         }
         if (url === "/v1/chat/completions") {
           const streamBody =
@@ -454,6 +497,177 @@ describe("App theme mode", () => {
     expect(await screen.findByText("GPT-5.3-Codex-Spark")).toBeTruthy();
     await waitFor(() => {
       expect(capturedRequests.some((request) => request.url === "/admin/codex/usage")).toBe(true);
+    });
+  });
+
+  it("shows scaled decimal weight and the five-hour reset time", async () => {
+    // 账号卡片应该使用易读权重，并直接展示主额度重置时间。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+
+    expect(await screen.findByText("3.38")).toBeTruthy();
+    expect(screen.queryByText("3.38e-3")).toBeNull();
+    expect(await screen.findByText("5h 重置")).toBeTruthy();
+    expect(await screen.findByText(new Date(1783814968 * 1000).toLocaleString())).toBeTruthy();
+  });
+
+  it("separates current concurrency from the unlimited limit", async () => {
+    // OAuth 账号页只保留配置上限，实时占用迁移到独立负载页。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+
+    expect(await screen.findByText("并发上限")).toBeTruthy();
+    expect(await screen.findByText("不限制")).toBeTruthy();
+    expect(screen.queryByText("当前并发")).toBeNull();
+  });
+
+  it("configures a single-account dispatch policy in a themed dialog", async () => {
+    // 配置页通过独立弹窗保存调度模式，不混入普通 YAML 保存按钮。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "配置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "设置账户调度策略" }));
+
+    expect(await screen.findByRole("dialog", { name: "设置账户调度策略" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("radio", { name: "单账户模式" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "单账户选择" }), { target: { value: "account-a" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存策略" }));
+
+    await waitFor(() => {
+      expect(capturedRequests).toContainEqual({
+        url: "/admin/oauth/dispatch",
+        method: "PUT",
+        body: { mode: "single", singleAccountKey: "account-a" }
+      });
+    });
+  });
+
+  it("shows account concurrency load below OAuth accounts and refreshes every second", async () => {
+    // 负载页独立展示当前并发和等待队列，并只在页面可见时持续刷新。
+    render(<App />);
+    const navButtons = await screen.findAllByRole("button");
+    const oauthIndex = navButtons.findIndex((button) => button.textContent === "OAuth 账号");
+    const loadIndex = navButtons.findIndex((button) => button.textContent === "账户并发负载");
+    expect(loadIndex).toBe(oauthIndex + 1);
+
+    fireEvent.click(screen.getByRole("button", { name: "账户并发负载" }));
+    expect(await screen.findByRole("heading", { name: "账户并发负载" })).toBeTruthy();
+    expect(await screen.findByText("等待队列")).toBeTruthy();
+    expect(await screen.findByText("3", { selector: "strong" })).toBeTruthy();
+    expect(await screen.findByText("账号 A")).toBeTruthy();
+    expect(await screen.findByText("2 / 不限制")).toBeTruthy();
+    expect(await screen.findByText("5h 剩余额度：67%")).toBeTruthy();
+    expect(await screen.findByText(`重置：${new Date(1783814968 * 1000).toLocaleString()}`)).toBeTruthy();
+
+    const initialLoads = capturedRequests.filter((request) => request.url === "/admin/oauth/accounts").length;
+    await new Promise((resolve) => window.setTimeout(resolve, 1100));
+    await waitFor(() => {
+      expect(capturedRequests.filter((request) => request.url === "/admin/oauth/accounts").length).toBeGreaterThan(initialLoads);
+    });
+  });
+
+  it("shows an accessible five-hour quota bar on OAuth account cards", async () => {
+    // OAuth 账号卡片用进度条直观展示主额度剩余比例。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+
+    const progress = await screen.findByRole("progressbar", { name: "账号 A 5h 剩余额度" });
+    expect(progress.getAttribute("aria-valuenow")).toBe("67");
+    expect((progress.firstElementChild as HTMLElement).style.width).toBe("67%");
+    const footer = progress.closest(".oauth-account-footer");
+    expect(footer).toBeTruthy();
+    expect(footer?.querySelector(".oauth-account-actions")).toBeTruthy();
+  });
+
+  it("scales each capacity track by account limit or observed unlimited load", async () => {
+    // 统一刻度为 5：不限账户当前 5 占满，上限 2 的账户轨道只占 40%。
+    const baseAccount = oauthAccountsStatus.accounts[0];
+    oauthAccountsResponse = {
+      ...oauthAccountsStatus,
+      globalCurrentConcurrency: 5,
+      accounts: [
+        { ...baseAccount, alias: "不限账户", currentConcurrency: 5, maxConcurrency: null },
+        { ...baseAccount, key: "account-b", alias: "有限账户", currentConcurrency: 0, maxConcurrency: 2 }
+      ]
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "账户并发负载" }));
+
+    const unlimitedCapacity = await screen.findByLabelText("不限账户 并发容量");
+    const unlimitedActive = await screen.findByLabelText("不限账户 当前并发");
+    const limitedCapacity = await screen.findByLabelText("有限账户 并发容量");
+    const limitedActive = await screen.findByLabelText("有限账户 当前并发");
+
+    expect(unlimitedCapacity.style.width).toBe("100%");
+    expect(unlimitedActive.style.width).toBe("100%");
+    expect(limitedCapacity.style.width).toBe("40%");
+    expect(limitedActive.style.width).toBe("0%");
+  });
+
+  it("removes the legacy auth path field from config", async () => {
+    // 旧单账号认证路径已停止兼容，配置页不应继续展示该输入框。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "配置" }));
+
+    expect(screen.queryByText("旧单账号 Auth path（仅兼容迁移）")).toBeNull();
+  });
+
+  it("hides raw login output after success and dismisses the notice", async () => {
+    // 成功提示只短暂说明结果，不能继续铺开 CLI 原始日志。
+    oauthLoginStartResponse = {
+      id: "login-success",
+      deviceAuth: false,
+      status: "success",
+      message: "OAuth 账号添加成功",
+      output: ["Successfully logged in", "https://auth.openai.com/private"],
+      accountKey: "account-a"
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    fireEvent.click(await screen.findByRole("button", { name: "添加账号" }));
+
+    expect(await screen.findByText("OAuth 账号添加成功")).toBeTruthy();
+    expect(screen.queryByText("Successfully logged in")).toBeNull();
+    await waitFor(() => expect(screen.queryByText("OAuth 账号添加成功")).toBeNull(), { timeout: 4000 });
+  });
+
+  it("edits account alias in a themed dialog", async () => {
+    // 重命名应使用页面内对话框，并提交新的账号别名。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    fireEvent.click(await screen.findByRole("button", { name: "重命名" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "重命名 OAuth 账号" });
+    const input = screen.getByRole("textbox", { name: "账号别名" });
+    fireEvent.change(input, { target: { value: "主力账号" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    expect(dialog).toBeTruthy();
+    await waitFor(() => {
+      expect(capturedRequests).toContainEqual({
+        url: "/admin/oauth/accounts/account-a",
+        method: "PATCH",
+        body: { alias: "主力账号" }
+      });
+    });
+  });
+
+  it("sets account concurrency with an explicit unlimited choice", async () => {
+    // 并发设置弹窗应该用明确模式代替留空约定。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    fireEvent.click(await screen.findByRole("button", { name: "并发设置" }));
+
+    expect(await screen.findByRole("dialog", { name: "设置账号并发" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("radio", { name: "限制并发" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "最大并发数" }), { target: { value: "8" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => {
+      expect(capturedRequests).toContainEqual({
+        url: "/admin/oauth/accounts/account-a",
+        method: "PATCH",
+        body: { maxConcurrency: 8 }
+      });
     });
   });
 

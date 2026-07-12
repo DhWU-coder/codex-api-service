@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
 
-from codex_api_service.auth import CodexAuth, CodexCredentials
+import pytest
+
+from codex_api_service.auth import CodexAuth, CodexCredentials, OAuthLoginRequired
 
 
 def write_auth_file(path: Path, *, access: str, refresh: str, expires: int) -> None:
@@ -52,3 +54,23 @@ def test_ensure_credentials_imports_fresh_auth_when_local_refresh_token_invalida
     assert refresh_tokens == ["old-refresh"]
     saved = json.loads(local_auth.read_text(encoding="utf-8"))
     assert saved["tokens"]["access_token"] == "fresh-access"
+    assert isinstance(saved["last_refresh"], str)
+
+
+def test_multi_account_auth_does_not_import_or_start_interactive_login(tmp_path: Path) -> None:
+    """验证账号池凭据缺失时不会误导入当前 CLI 账号或阻塞请求登录。"""
+    import_auth = tmp_path / "global-auth.json"
+    write_auth_file(import_auth, access="other-access", refresh="other-refresh", expires=4_102_444_800_000)
+    opened: list[str] = []
+    auth = CodexAuth(
+        auth_path=tmp_path / "account" / "auth.json",
+        import_auth_path=import_auth,
+        allow_import=False,
+        allow_interactive_login=False,
+        open_browser=lambda url: opened.append(url) or True,
+    )
+
+    with pytest.raises(OAuthLoginRequired):
+        auth.ensure_credentials()
+
+    assert opened == []

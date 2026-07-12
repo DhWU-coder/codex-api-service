@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -21,11 +22,18 @@ async def fetch_codex_usage_snapshot(
     *,
     client_version: str,
     app_server_rpc: AppServerRpc | None = None,
+    account_home: str | None = None,
 ) -> dict[str, Any]:
     """通过 Codex app-server 读取当前账号额度，并返回脱敏摘要。"""
-    rpc = app_server_rpc or _read_rate_limits_from_app_server
     try:
-        payload = await rpc(client_version, APP_SERVER_TIMEOUT_SECONDS)
+        if app_server_rpc is not None:
+            payload = await app_server_rpc(client_version, APP_SERVER_TIMEOUT_SECONDS)
+        else:
+            payload = await _read_rate_limits_from_app_server(
+                client_version,
+                APP_SERVER_TIMEOUT_SECONDS,
+                account_home=account_home,
+            )
     except Exception as error:  # pragma: no cover - 真实 app-server 异常依赖本机 Codex 安装。
         raise CodexUsageFetchError("Codex usage status unavailable") from error
     return summarize_codex_usage(payload)
@@ -63,8 +71,16 @@ def summarize_codex_usage(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _read_rate_limits_from_app_server(client_version: str, timeout: float) -> dict[str, Any]:
+async def _read_rate_limits_from_app_server(
+    client_version: str,
+    timeout: float,
+    *,
+    account_home: str | None = None,
+) -> dict[str, Any]:
     """短暂启动 Codex app-server，通过官方 RPC 读取额度快照。"""
+    environment = os.environ.copy()
+    if account_home:
+        environment["CODEX_HOME"] = account_home
     process = await asyncio.create_subprocess_exec(
         "codex",
         "app-server",
@@ -72,6 +88,7 @@ async def _read_rate_limits_from_app_server(client_version: str, timeout: float)
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
+        env=environment,
     )
     try:
         await _send_rpc(

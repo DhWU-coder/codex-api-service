@@ -382,6 +382,21 @@ textarea {
   font-size: 13px;
 }
 
+/* OAuth 工具栏按钮使用一致尺寸和留白，避免连续操作入口挤在一起。 */
+.oauth-toolbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.oauth-toolbar-button {
+  min-height: 42px;
+  padding: 0 16px;
+  white-space: nowrap;
+}
+
 /* 看板内容用紧凑网格承载指标和趋势，避免占用聊天区域的心智空间。 */
 .dashboard-content {
   display: grid;
@@ -1796,5 +1811,491 @@ th {
 
   .log-controls {
     grid-template-columns: 1fr;
+  }
+}
+.oauth-account-list {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+}
+
+.oauth-account-card {
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  padding: 18px;
+  background: var(--message-bg);
+}
+
+.oauth-account-head,
+.oauth-account-actions,
+.oauth-account-metrics {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.oauth-account-head {
+  justify-content: space-between;
+}
+
+.oauth-account-head h3,
+.oauth-account-head p {
+  margin: 0;
+}
+
+.oauth-account-metrics {
+  margin: 16px 0;
+}
+
+.oauth-account-metrics span {
+  min-width: 150px;
+  color: var(--page-muted);
+}
+
+.oauth-account-metrics > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.oauth-account-metrics .metric-label {
+  min-width: 0;
+}
+
+.oauth-account-metrics strong {
+  color: var(--page-text);
+}
+
+.oauth-quota-visual {
+  display: grid;
+  flex: 1 1 240px;
+  gap: 8px;
+  min-width: 240px;
+}
+
+.oauth-quota-visual-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--page-muted);
+  font-size: 13px;
+}
+
+.oauth-quota-visual-head strong {
+  color: var(--page-text);
+}
+
+.oauth-quota-track {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--pill-bg);
+}
+
+.oauth-quota-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary-bg);
+  transition: width 180ms ease, background-color 180ms ease;
+}
+
+.oauth-quota-track.warning span {
+  background: #f59e0b;
+}
+
+.oauth-quota-track.critical span {
+  background: var(--danger-text);
+}
+
+.oauth-account-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
+.oauth-account-footer {
+  display: flex;
+  align-items: end;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+/* 调度策略卡把运行时账户选择和普通 YAML 表单明确分开。 */
+.dispatch-policy-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 18px 18px 0;
+  padding: 16px 18px;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: var(--message-bg);
+}
+
+.dispatch-policy-card > div {
+  display: grid;
+  gap: 4px;
+}
+
+.dispatch-policy-card span,
+.dispatch-policy-card small {
+  color: var(--page-muted);
+}
+
+.dispatch-policy-card strong {
+  font-size: 17px;
+}
+
+.dispatch-modal {
+  width: min(620px, calc(100vw - 32px));
+}
+
+.dispatch-mode-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.dispatch-mode-options > label,
+.dispatch-account-list > label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.dispatch-mode-options > label.selected {
+  border-color: var(--primary-bg);
+  background: color-mix(in srgb, var(--primary-bg) 10%, transparent);
+}
+
+.dispatch-mode-options input,
+.dispatch-account-list input {
+  width: auto;
+  margin-top: 3px;
+}
+
+.dispatch-mode-options span,
+.dispatch-account-list span {
+  display: grid;
+  gap: 4px;
+}
+
+.dispatch-mode-options small,
+.dispatch-account-list small {
+  color: var(--page-muted);
+}
+
+.dispatch-account-list {
+  display: grid;
+  gap: 10px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+/* 并发负载页用统一刻度横向条形图展示所有账户。 */
+.account-load-page {
+  display: grid;
+  gap: 22px;
+  padding: 20px;
+  overflow: auto;
+}
+
+.account-load-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.account-load-summary > div {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: var(--message-bg);
+}
+
+.account-load-summary span {
+  color: var(--page-muted);
+  font-size: 13px;
+}
+
+.account-load-summary strong {
+  font-size: 22px;
+}
+
+.account-load-chart {
+  display: grid;
+  gap: 12px;
+}
+
+.account-load-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.9fr) minmax(240px, 2fr) 120px;
+  align-items: center;
+  gap: 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: var(--message-bg);
+}
+
+.account-load-row.disabled {
+  opacity: 0.58;
+}
+
+.account-load-label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.account-load-label strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-load-label small {
+  color: var(--page-muted);
+}
+
+.account-load-label .account-load-quota {
+  margin-top: 4px;
+  color: var(--page-text);
+}
+
+.account-load-label .account-load-reset {
+  font-size: 12px;
+}
+
+.account-load-scale,
+.account-load-capacity,
+.account-load-track {
+  height: 16px;
+}
+
+.account-load-scale {
+  width: 100%;
+}
+
+.account-load-capacity {
+  transition: width 180ms ease;
+}
+
+.account-load-track {
+  width: 100%;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--pill-bg);
+}
+
+.account-load-track span {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary-bg), color-mix(in srgb, var(--primary-bg) 66%, #62d9ff));
+  transition: width 180ms ease;
+}
+
+.account-load-value {
+  text-align: right;
+}
+
+@media (max-width: 900px) {
+  .dispatch-policy-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dispatch-mode-options,
+  .account-load-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .account-load-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .account-load-value {
+    text-align: left;
+  }
+
+  .oauth-account-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .oauth-account-actions {
+    justify-content: flex-start;
+  }
+}
+
+.danger-button {
+  border: 1px solid var(--danger-text);
+  color: var(--danger-text);
+  background: var(--danger-bg);
+}
+
+.account-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(2, 7, 16, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.account-modal {
+  width: min(520px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  background: var(--panel-bg);
+  color: var(--page-text);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+}
+
+.account-modal-head,
+.account-modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+}
+
+.account-modal-head {
+  border-bottom: 1px solid var(--panel-divider);
+}
+
+/* 弹窗关闭按钮必须跟随标题栏布局，不能继承聊天消息的绝对定位。 */
+.account-modal-head .icon-button {
+  position: static;
+  flex: 0 0 auto;
+}
+
+.account-modal-head h2 {
+  margin: 4px 0 0;
+  font-size: 20px;
+}
+
+.account-modal-eyebrow {
+  color: var(--page-muted);
+  font-size: 12px;
+}
+
+.account-modal-body {
+  display: grid;
+  gap: 16px;
+  padding: 22px 20px;
+}
+
+.account-modal-field {
+  display: grid;
+  gap: 8px;
+}
+
+.account-modal-field > span {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.account-modal-field input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--input-border);
+  border-radius: 11px;
+  padding: 11px 12px;
+  background: var(--input-bg);
+  color: var(--input-text);
+  font: inherit;
+  outline: none;
+}
+
+.account-modal-field input:focus {
+  border-color: var(--primary-bg);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-bg) 22%, transparent);
+}
+
+.account-modal-field small,
+.account-concurrency-options small {
+  color: var(--page-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.account-modal-field.compact {
+  padding: 2px 4px 0 34px;
+}
+
+.account-concurrency-options {
+  display: grid;
+  gap: 10px;
+}
+
+.account-concurrency-options > label {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 14px;
+  border: 1px solid var(--secondary-border);
+  border-radius: 12px;
+  background: var(--secondary-bg);
+  cursor: pointer;
+}
+
+.account-concurrency-options > label.selected {
+  border-color: var(--primary-bg);
+  background: color-mix(in srgb, var(--primary-bg) 10%, var(--secondary-bg));
+}
+
+.account-concurrency-options > label input {
+  margin-top: 3px;
+  accent-color: var(--primary-bg);
+}
+
+.account-concurrency-options > label span {
+  display: grid;
+  gap: 3px;
+}
+
+.account-modal-error {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--error-bg);
+  color: var(--error-text);
+  font-size: 13px;
+}
+
+.account-modal-actions {
+  justify-content: flex-end;
+  border-top: 1px solid var(--panel-divider);
+  background: color-mix(in srgb, var(--panel-bg) 88%, var(--page-bg));
+}
+
+@media (max-width: 640px) {
+  .account-modal-backdrop {
+    align-items: end;
+    padding: 12px;
+  }
+
+  .account-modal {
+    border-radius: 16px;
+  }
+
+  .oauth-account-metrics span {
+    min-width: calc(50% - 12px);
   }
 }
