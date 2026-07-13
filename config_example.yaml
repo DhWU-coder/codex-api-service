@@ -22,6 +22,8 @@ codex:
   responses_url: https://chatgpt.com/backend-api/codex/responses
   # 非流式聚合和上游请求的超时秒数。
   timeout_seconds: 120
+  # SSE 连续无任何上游数据的超时秒数，收到事件后会重新计时。
+  stream_idle_timeout_seconds: 300
   # 每个真实 Codex 模型的请求缺省值；未列出的模型固定使用 medium 且关闭快速模式。
   # 调用方显式传入 reasoning_effort、reasoning.effort、fast_mode 或 service_tier 时优先。
   model_request_defaults: {}

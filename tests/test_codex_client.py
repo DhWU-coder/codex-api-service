@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from codex_api_service.auth import CodexCredentials
@@ -9,6 +11,84 @@ from codex_api_service.codex_client import (
     _sse_body_events,
 )
 from codex_api_service.config import CodexConfig
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_line", "expected_events"),
+    [
+        ("data: [DONE]", []),
+        (
+            'data: {"type":"response.completed","response":{"id":"resp_done"}}',
+            [{"type": "response.completed", "response": {"id": "resp_done"}}],
+        ),
+    ],
+)
+async def test_stream_response_stops_on_protocol_terminal_without_waiting_for_eof(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_line: str,
+    expected_events: list[dict],
+) -> None:
+    """验证协议已完成时不再依赖上游主动关闭 TCP 连接。"""
+
+    class StaticAuth:
+        """提供固定有效凭据。"""
+
+        def ensure_credentials(self) -> CodexCredentials:
+            """返回测试凭据。"""
+            return CodexCredentials(access="access", refresh="refresh", expires=4_102_444_800_000)
+
+    class HangingStreamResponse:
+        """发送终止行后永久保持连接。"""
+
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def __aenter__(self) -> "HangingStreamResponse":
+            """进入响应上下文。"""
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            """退出响应上下文。"""
+            return None
+
+        async def aiter_lines(self):
+            """产出终止信号后模拟不发送 EOF 的上游。"""
+            yield terminal_line
+            await asyncio.Event().wait()
+
+    class FakeAsyncClient:
+        """返回保持连接的测试响应。"""
+
+        received_timeouts: list[object] = []
+
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            """记录客户端读取超时配置。"""
+            self.received_timeouts.append(kwargs.get("timeout"))
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            """进入客户端上下文。"""
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            """退出客户端上下文。"""
+            return None
+
+        def stream(self, *_args: object, **_kwargs: object) -> HangingStreamResponse:
+            """返回测试流。"""
+            return HangingStreamResponse()
+
+    monkeypatch.setattr("codex_api_service.codex_client.httpx.AsyncClient", FakeAsyncClient)
+    client = CodexClient(auth=StaticAuth(), config=CodexConfig(responses_url="https://example.test/codex"))
+
+    async def collect_events() -> list[dict]:
+        """收集客户端产出的全部事件。"""
+        return [event async for event in client.stream_response({"model": "gpt-5.5"})]
+
+    events = await asyncio.wait_for(collect_events(), timeout=0.1)
+
+    assert events == expected_events
+    assert FakeAsyncClient.received_timeouts[0].read == 300
 
 
 def test_codex_headers_do_not_advertise_service_package_version_as_codex_version() -> None:

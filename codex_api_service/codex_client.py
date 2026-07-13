@@ -105,8 +105,12 @@ class CodexClient:
             # ensure_credentials 会在必要时刷新 token 或触发首次登录。
             credentials = self.auth.ensure_credentials()
 
-            # read=None 允许长时间流式输出；connect 仍保留超时避免卡在握手。
-            timeout = httpx.Timeout(self.config.timeout_seconds, connect=30.0, read=None)
+            # 读取超时只限制连续无数据时间，正常 SSE 事件会持续重置计时。
+            timeout = httpx.Timeout(
+                self.config.timeout_seconds,
+                connect=30.0,
+                read=self.config.stream_idle_timeout_seconds,
+            )
             async with httpx.AsyncClient(timeout=timeout) as client:
                 async with client.stream(
                     "POST",
@@ -142,10 +146,14 @@ class CodexClient:
 
                     # SSE 每个 data 行都是一个 JSON event；[DONE] 表示流结束。
                     async for line in response.aiter_lines():
+                        if _is_sse_done_line(line):
+                            return
                         event = _parse_sse_line(line)
                         if event is None:
                             continue
                         yield event
+                        if event.get("type") == "response.completed":
+                            return
                     return
 
 
@@ -237,6 +245,12 @@ def _parse_sse_line(line: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return event if isinstance(event, dict) else None
+
+
+def _is_sse_done_line(line: str) -> bool:
+    """判断当前 SSE 行是否为协议结束标记。"""
+    stripped = line.strip()
+    return stripped.startswith("data:") and stripped[5:].strip() == "[DONE]"
 
 
 def _sse_body_events(body: str) -> list[dict[str, Any]]:

@@ -58,6 +58,7 @@ class CodexConfig:
     available_models: tuple[str, ...] = ("gpt-5.5",)
     responses_url: str = DEFAULT_CODEX_RESPONSES_URL
     timeout_seconds: int = 120
+    stream_idle_timeout_seconds: int = 300
     reasoning_effort: str = "medium"
     instructions: str = DEFAULT_INSTRUCTIONS
     include_reasoning: bool = True
@@ -157,6 +158,10 @@ def load_config(
         available_models=available_models,
         responses_url=str(_nested_get(raw_config, ["codex", "responses_url"], DEFAULT_CODEX_RESPONSES_URL)),
         timeout_seconds=int(_nested_get(raw_config, ["codex", "timeout_seconds"], 120)),
+        stream_idle_timeout_seconds=_positive_int(
+            _nested_get(raw_config, ["codex", "stream_idle_timeout_seconds"], 300),
+            field_name="codex.stream_idle_timeout_seconds",
+        ),
         reasoning_effort=str(_nested_get(raw_config, ["codex", "reasoning_effort"], "medium")),
         instructions=str(_nested_get(raw_config, ["codex", "instructions"], DEFAULT_INSTRUCTIONS)),
         include_reasoning=bool(_nested_get(raw_config, ["codex", "include_reasoning"], True)),

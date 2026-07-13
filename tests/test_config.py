@@ -21,6 +21,7 @@ def test_load_config_uses_default_values_when_yaml_is_missing(tmp_path: Path) ->
     assert config.codex.default_model == "gpt-5.5"
     assert config.codex.reasoning_effort == "medium"
     assert config.codex.fast_mode is True
+    assert config.codex.stream_idle_timeout_seconds == 300
 
     # 默认日志必须落到项目根目录下，便于 codex-usage 导入整个项目。
     assert config.usage.enabled is True
@@ -48,6 +49,26 @@ def test_load_config_parses_multi_oauth_and_concurrency(tmp_path: Path) -> None:
     assert config.auth.account_store_path == tmp_path / "secrets" / "oauth"
     assert config.concurrency.global_max == 8
     assert config.concurrency.queue_timeout_seconds == 90
+
+
+def test_load_config_parses_stream_idle_timeout(tmp_path: Path) -> None:
+    """验证 SSE 读取空闲超时可以从 YAML 单独配置。"""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("codex:\n  stream_idle_timeout_seconds: 45\n", encoding="utf-8")
+
+    config = load_config(project_root=tmp_path, config_path=config_path)
+
+    assert config.codex.stream_idle_timeout_seconds == 45
+
+
+@pytest.mark.parametrize("value", [0, -1, "bad"])
+def test_load_config_rejects_invalid_stream_idle_timeout(tmp_path: Path, value: object) -> None:
+    """验证 SSE 读取空闲超时必须为正整数。"""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"codex:\n  stream_idle_timeout_seconds: {value}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="codex.stream_idle_timeout_seconds"):
+        load_config(project_root=tmp_path, config_path=config_path)
 
 
 @pytest.mark.parametrize("value", [0, -1, "bad"])
