@@ -107,7 +107,7 @@ python -m codex_api_service.app
 ```
 
 看到 `Uvicorn running on http://127.0.0.1:1219` 就表示启动了。这个方式会占住当前终端，关闭终端服务就停。
-启动时也会打印可复制地址；如果 `server.host` 是 `0.0.0.0`，还会额外打印局域网地址：
+启动时也会打印可复制地址；如果 `server.host` 是 `0.0.0.0`，还会额外打印实际外部访问地址：
 
 ```text
 Codex API Service starting
@@ -128,113 +128,48 @@ curl http://127.0.0.1:1219/admin/models
 启动前查看有效配置，输出不会包含密钥：
 
 ```bash
-python -m codex_api_service.app --print-config
+codex-api-service --print-config
 ```
 
-## 挂成后台服务
+## 后台服务管理
 
-后台服务脚本会优先使用项目 `.venv`；如果找不到虚拟环境，会打印 `WARNING` 并回退到全局 Python。
+`codex-api-service` 会自动使用当前系统的用户级后台服务：macOS 使用 launchd，Ubuntu/Linux 使用 systemd user service，Windows 使用当前用户的计划任务，不需要手动执行平台脚本。
 
-### macOS
-
-macOS 使用 launchd 用户服务。安装并启动：
+启动后台服务；`start` 和 `run` 语义相同：
 
 ```bash
-bash scripts/install_launchd_service.sh
+codex-api-service start
+codex-api-service run
 ```
 
-安装后服务名是：
-
-```text
-com.codex-api-service.local
-```
-
-常用管理命令：
+停止后台进程但保留服务注册和登录自启配置；`stop` 和 `end` 语义相同：
 
 ```bash
-# 查看是否加载。
-launchctl print gui/$(id -u)/com.codex-api-service.local
-
-# 重启服务。
-launchctl kickstart -k gui/$(id -u)/com.codex-api-service.local
-
-# 停止并卸载服务。
-bash scripts/uninstall_launchd_service.sh
+codex-api-service stop
+codex-api-service end
 ```
 
-日志位置：
-
-```text
-./logs/launchd.out.log
-./logs/launchd.err.log
-```
-
-### Ubuntu
-
-Ubuntu 使用 systemd 用户服务，不需要 sudo。安装并启动：
+重启已注册的后台服务：
 
 ```bash
-bash scripts/install_systemd_user_service.sh
+codex-api-service restart
 ```
 
-安装后服务名是：
-
-```text
-codex-api-service.service
-```
-
-常用管理命令：
+停止并删除后台服务注册：
 
 ```bash
-# 查看状态。
-systemctl --user status codex-api-service.service
-
-# 重启服务。
-systemctl --user restart codex-api-service.service
-
-# 查看实时日志。
-journalctl --user -u codex-api-service -f
-
-# 停止并卸载服务。
-bash scripts/uninstall_systemd_user_service.sh
+codex-api-service uninstall
 ```
 
-### Windows
+直接执行不带参数的 `codex-api-service` 只显示帮助。后台 runner 会优先使用项目 `.venv`；如果找不到虚拟环境，会打印 `WARNING` 并回退到全局 Python。
 
-Windows 使用当前用户的 Task Scheduler 计划任务。用 PowerShell 在项目目录执行：
+`start`、`run` 和 `restart` 会按照有效配置打印访问地址。当 `server.host` 为 `0.0.0.0` 时，会额外打印可复制的 `External API` 和 `External Console`。这些地址表示局域网或当前网络接口可访问，并不等于已经完成公网端口映射或 HTTPS 配置。外部监听时建议配置 `api.local_api_key`。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install_windows_task.ps1
-```
+后台日志位置：
 
-安装后任务名是：
-
-```text
-CodexApiService
-```
-
-常用管理命令：
-
-```powershell
-# 查看任务。
-Get-ScheduledTask -TaskName CodexApiService
-
-# 手动启动任务。
-Start-ScheduledTask -TaskName CodexApiService
-
-# 停止任务。
-Stop-ScheduledTask -TaskName CodexApiService
-
-# 停止并卸载任务。
-powershell -ExecutionPolicy Bypass -File scripts\uninstall_windows_task.ps1
-```
-
-日志位置：
-
-```text
-.\logs\windows.out.log
-.\logs\windows.err.log
-```
+- macOS：`./logs/launchd.out.log` 和 `./logs/launchd.err.log`
+- Windows：`.\logs\windows.out.log` 和 `.\logs\windows.err.log`
+- Ubuntu/Linux：systemd 用户日志
 
 ## 本地控制台
 

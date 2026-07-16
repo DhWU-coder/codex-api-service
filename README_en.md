@@ -107,7 +107,7 @@ python -m codex_api_service.app
 When you see `Uvicorn running on http://127.0.0.1:1219`, the service is running.
 This mode keeps the current terminal occupied; closing the terminal stops the service.
 
-The startup output also prints copyable URLs. If `server.host` is `0.0.0.0`, it also prints LAN URLs:
+The startup output also prints copyable URLs. If `server.host` is `0.0.0.0`, it also prints the actual external access URLs:
 
 ```text
 Codex API Service starting
@@ -128,113 +128,48 @@ curl http://127.0.0.1:1219/admin/models
 Print the effective configuration without secrets:
 
 ```bash
-python -m codex_api_service.app --print-config
+codex-api-service --print-config
 ```
 
-## Run as a Background Service
+## Background Service Management
 
-Background service scripts prefer the project `.venv`. If the virtual environment is missing, they print a `WARNING` and fall back to global Python.
+`codex-api-service` automatically uses the current platform's per-user background service: launchd on macOS, a systemd user service on Ubuntu/Linux, and a per-user scheduled task on Windows. No platform-specific installation script is required.
 
-### macOS
-
-macOS uses a launchd user service. Install and start it with:
+Start the background service; `start` and `run` are equivalent:
 
 ```bash
-bash scripts/install_launchd_service.sh
+codex-api-service start
+codex-api-service run
 ```
 
-The service label is:
-
-```text
-com.codex-api-service.local
-```
-
-Common management commands:
+Stop the background process while preserving its registration and login auto-start configuration; `stop` and `end` are equivalent:
 
 ```bash
-# Check whether the service is loaded.
-launchctl print gui/$(id -u)/com.codex-api-service.local
-
-# Restart the service.
-launchctl kickstart -k gui/$(id -u)/com.codex-api-service.local
-
-# Stop and uninstall the service.
-bash scripts/uninstall_launchd_service.sh
+codex-api-service stop
+codex-api-service end
 ```
 
-Log files:
-
-```text
-./logs/launchd.out.log
-./logs/launchd.err.log
-```
-
-### Ubuntu
-
-Ubuntu uses a systemd user service and does not require sudo. Install and start it with:
+Restart a registered background service:
 
 ```bash
-bash scripts/install_systemd_user_service.sh
+codex-api-service restart
 ```
 
-The service name is:
-
-```text
-codex-api-service.service
-```
-
-Common management commands:
+Stop the service and remove its system registration:
 
 ```bash
-# Check status.
-systemctl --user status codex-api-service.service
-
-# Restart the service.
-systemctl --user restart codex-api-service.service
-
-# Follow live logs.
-journalctl --user -u codex-api-service -f
-
-# Stop and uninstall the service.
-bash scripts/uninstall_systemd_user_service.sh
+codex-api-service uninstall
 ```
 
-### Windows
+Running `codex-api-service` without arguments only prints help. The internal background runner prefers the project `.venv`; if the virtual environment is missing, it prints a `WARNING` and falls back to global Python.
 
-Windows uses a per-user Task Scheduler task. Run this from PowerShell in the project directory:
+`start`, `run`, and `restart` print URLs from the effective configuration. When `server.host` is `0.0.0.0`, the output also includes copyable `External API` and `External Console` URLs. These URLs indicate access through the LAN or current network interface; they do not automatically provide public internet routing or HTTPS. Configure `api.local_api_key` before exposing the service externally.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install_windows_task.ps1
-```
+Background log locations:
 
-The task name is:
-
-```text
-CodexApiService
-```
-
-Common management commands:
-
-```powershell
-# Inspect the task.
-Get-ScheduledTask -TaskName CodexApiService
-
-# Start the task manually.
-Start-ScheduledTask -TaskName CodexApiService
-
-# Stop the task.
-Stop-ScheduledTask -TaskName CodexApiService
-
-# Stop and uninstall the task.
-powershell -ExecutionPolicy Bypass -File scripts\uninstall_windows_task.ps1
-```
-
-Log files:
-
-```text
-.\logs\windows.out.log
-.\logs\windows.err.log
-```
+- macOS: `./logs/launchd.out.log` and `./logs/launchd.err.log`
+- Windows: `.\logs\windows.out.log` and `.\logs\windows.err.log`
+- Ubuntu/Linux: the systemd user journal
 
 ## Local Console
 

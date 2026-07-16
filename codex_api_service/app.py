@@ -1060,11 +1060,16 @@ def _print_startup_banner(config: AppConfig) -> None:
     print(f"  Local API:   {urls['api']}", flush=True)
     print(f"  Local UI:    {urls['console']}", flush=True)
     if "lan_api" in urls:
-        print(f"  LAN API:     {urls['lan_api']}", flush=True)
-        print(f"  LAN Console: {urls['lan_console']}", flush=True)
+        print(f"  External API:     {urls['lan_api']}", flush=True)
+        print(f"  External Console: {urls['lan_console']}", flush=True)
     elif "lan_note" in urls:
-        print(f"  LAN address: {urls['lan_note']}", flush=True)
+        print(f"  External address: {urls['lan_note']}", flush=True)
     print(f"  Health:      {urls['health']}", flush=True)
+    if config.server.host == "0.0.0.0" and not config.api.local_api_key:
+        print(
+            "  WARNING: 当前允许外部访问但未配置 API key，任何可连接该端口的设备都能调用服务。",
+            flush=True,
+        )
     print("", flush=True)
 
 

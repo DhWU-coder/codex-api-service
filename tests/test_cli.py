@@ -53,14 +53,20 @@ def test_startup_urls_include_lan_fallback_when_detection_fails(tmp_path: Path) 
     assert urls["lan_note"] == "not detected, use your machine LAN IP"
 
 
-def test_startup_banner_prints_lan_console_when_available(tmp_path: Path, monkeypatch, capsys) -> None:
-    """验证前台启动横幅会实际打印 LAN 控制台地址。"""
+def test_startup_banner_prints_external_console_and_auth_warning_when_available(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """验证前台启动横幅会打印外部地址和无鉴权警告。"""
     # 让检测函数返回固定地址，测试启动横幅而不依赖真实网卡。
     monkeypatch.setattr(app_module, "_detect_lan_host", lambda: "192.168.1.23")
     config = AppConfig(project_root=tmp_path, server=ServerConfig(host="0.0.0.0", port=1888))
 
     app_module._print_startup_banner(config)
 
-    # 用户运行 python -m codex_api_service.app 时，应能直接复制 LAN 控制台地址。
+    # 用户前台启动时应看到统一的外部地址术语和必要的安全提醒。
     output = capsys.readouterr().out
-    assert "LAN Console: http://192.168.1.23:1888/ui" in output
+    assert "External API:     http://192.168.1.23:1888/v1" in output
+    assert "External Console: http://192.168.1.23:1888/ui" in output
+    assert "未配置 API key" in output

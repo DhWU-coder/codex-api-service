@@ -33,49 +33,55 @@ def test_unix_runner_exposes_common_codex_cli_paths() -> None:
     assert "export PATH" in script
 
 
-def test_ubuntu_systemd_user_scripts_exist_and_use_user_scope() -> None:
-    """验证 Ubuntu systemd 用户服务脚本存在，并使用无 sudo 的用户服务。"""
-    # 安装脚本应创建 systemd user service，卸载脚本应移除同一个服务。
-    install_script = _read_project_file("scripts/install_systemd_user_service.sh")
-    uninstall_script = _read_project_file("scripts/uninstall_systemd_user_service.sh")
-
-    assert "systemctl --user daemon-reload" in install_script
-    assert "systemctl --user enable" in install_script
-    assert "codex-api-service.service" in install_script
-    assert "journalctl --user -u codex-api-service -f" in install_script
-    assert "systemctl --user disable" in uninstall_script
-    assert "codex-api-service.service" in uninstall_script
-
-
-def test_windows_task_scripts_exist_and_use_python_fallback() -> None:
-    """验证 Windows 脚本存在，并按虚拟环境优先、警告后全局 Python 兜底启动。"""
-    # PowerShell runner 负责选择 Python，计划任务脚本负责登录后自动启动。
+def test_windows_runner_uses_python_fallback() -> None:
+    """验证 Windows 内部 runner 按虚拟环境优先并支持全局 Python 兜底。"""
     runner = _read_project_file("scripts/run_service.ps1")
-    install_script = _read_project_file("scripts/install_windows_task.ps1")
-    uninstall_script = _read_project_file("scripts/uninstall_windows_task.ps1")
 
     assert ".venv\\Scripts\\python.exe" in runner
     assert "Get-Command python" in runner
     assert "WARNING" in runner
     assert "Start-Process" in runner
-    assert "CodexApiService" in install_script
-    assert "Register-ScheduledTask" in install_script
-    assert "Unregister-ScheduledTask" in uninstall_script
 
 
-def test_readmes_document_macos_ubuntu_and_windows_service_modes() -> None:
-    """验证中英文 README 都说明 macOS、Ubuntu 和 Windows 后台运行方式。"""
-    # 公开仓库首页需要让不同系统用户都能找到对应安装入口。
+def test_legacy_service_entry_scripts_are_removed() -> None:
+    """验证公开的旧安装和卸载脚本已经删除，内部 runner 继续保留。"""
+    legacy_paths = [
+        "scripts/install_launchd_service.sh",
+        "scripts/uninstall_launchd_service.sh",
+        "scripts/install_systemd_user_service.sh",
+        "scripts/uninstall_systemd_user_service.sh",
+        "scripts/install_windows_task.ps1",
+        "scripts/uninstall_windows_task.ps1",
+    ]
+
+    for relative_path in legacy_paths:
+        assert not (PROJECT_ROOT / relative_path).exists()
+    assert (PROJECT_ROOT / "scripts/run_service.sh").exists()
+    assert (PROJECT_ROOT / "scripts/run_service.ps1").exists()
+
+
+def test_readmes_only_document_unified_service_commands() -> None:
+    """验证中英文 README 只公开统一后台服务命令。"""
     chinese_readme = _read_project_file("README.md")
     english_readme = _read_project_file("README_en.md")
 
-    assert "macOS" in chinese_readme
-    assert "Ubuntu" in chinese_readme
-    assert "Windows" in chinese_readme
-    assert "install_systemd_user_service.sh" in chinese_readme
-    assert "install_windows_task.ps1" in chinese_readme
-    assert "macOS" in english_readme
-    assert "Ubuntu" in english_readme
-    assert "Windows" in english_readme
-    assert "install_systemd_user_service.sh" in english_readme
-    assert "install_windows_task.ps1" in english_readme
+    for readme in (chinese_readme, english_readme):
+        assert "codex-api-service start" in readme
+        assert "codex-api-service run" in readme
+        assert "codex-api-service stop" in readme
+        assert "codex-api-service end" in readme
+        assert "codex-api-service restart" in readme
+        assert "codex-api-service uninstall" in readme
+        assert "install_launchd_service.sh" not in readme
+        assert "install_systemd_user_service.sh" not in readme
+        assert "install_windows_task.ps1" not in readme
+        assert "launchctl kickstart" not in readme
+        assert "systemctl --user restart" not in readme
+
+
+def test_setuptools_only_discovers_service_package() -> None:
+    """验证 editable 安装不会把日志和前端目录误识别为 Python 包。"""
+    pyproject = _read_project_file("pyproject.toml")
+
+    assert "[tool.setuptools.packages.find]" in pyproject
+    assert 'include = ["codex_api_service*"]' in pyproject

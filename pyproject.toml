@@ -21,8 +21,12 @@ dev = [
 ]
 
 [project.scripts]
-# 安装后可以直接执行 codex-api-service 启动本地服务。
-codex-api-service = "codex_api_service.app:main"
+# 安装后通过统一命令管理跨平台后台服务。
+codex-api-service = "codex_api_service.cli:main"
+
+[tool.setuptools.packages.find]
+# 只打包服务代码，避免把 frontend、logs 等顶层目录误识别成命名空间包。
+include = ["codex_api_service*"]
 
 [tool.pytest.ini_options]
 # pytest 默认只收集 tests 目录，避免扫描 .venv 或 IDE 文件。
