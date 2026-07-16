@@ -2318,6 +2318,7 @@ export function App() {
                 <div className="request-detail-grid">
                   <div><span>状态码</span><strong>{selectedLog.status_code}</strong></div>
                   <div><span>耗时</span><strong>{selectedLog.duration_ms}ms</strong></div>
+                  <div><span>账户</span><strong>{selectedLog.account_alias || "未记录"}</strong></div>
                   <div className="request-detail-wide"><span>Request ID</span><strong>{selectedLog.request_id || "-"}</strong></div>
                 </div>
               </section>

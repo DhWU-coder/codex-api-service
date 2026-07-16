@@ -31,6 +31,8 @@ class RequestLogEntry:
     reasoning_effort: str | None = None
     fast_mode: bool | None = None
     service_tier: str | None = None
+    account_key: str | None = None
+    account_alias: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换成 JSON 响应可序列化的 dict。"""
@@ -49,6 +51,8 @@ class RequestLogEntry:
             "reasoning_effort": self.reasoning_effort,
             "fast_mode": self.fast_mode,
             "service_tier": self.service_tier,
+            "account_key": self.account_key,
+            "account_alias": self.account_alias,
         }
 
 
@@ -80,6 +84,8 @@ class RequestLogStore:
         reasoning_effort: str | None = None,
         fast_mode: bool | None = None,
         service_tier: str | None = None,
+        account_key: str | None = None,
+        account_alias: str | None = None,
     ) -> RequestLogEntry:
         """追加一条请求元数据日志。"""
         # usage 统一映射到 codex-usage 的字段，方便前端直接显示。
@@ -99,6 +105,8 @@ class RequestLogStore:
             reasoning_effort=reasoning_effort,
             fast_mode=fast_mode,
             service_tier=service_tier,
+            account_key=account_key,
+            account_alias=account_alias,
         )
         self._items.appendleft(entry)
         self._append_persisted_entry(entry)
@@ -208,6 +216,8 @@ def _entry_from_dict(item: dict[str, Any]) -> RequestLogEntry | None:
             ),
             fast_mode=item["fast_mode"] if isinstance(item.get("fast_mode"), bool) else None,
             service_tier=item["service_tier"] if isinstance(item.get("service_tier"), str) else None,
+            account_key=item["account_key"] if isinstance(item.get("account_key"), str) else None,
+            account_alias=item["account_alias"] if isinstance(item.get("account_alias"), str) else None,
         )
     except (KeyError, TypeError, ValueError):
         return None

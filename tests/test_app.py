@@ -52,6 +52,13 @@ class FakeCodexClient:
             },
         }
 
+    def request_account_metadata(self) -> dict[str, str]:
+        """返回测试请求使用的安全账户元数据。"""
+        return {
+            "account_key": "account-a",
+            "account_alias": "owner@example.com",
+        }
+
 
 class FailingStreamCodexClient:
     """模拟 Codex backend 在流式请求开始后返回 HTTP 错误。"""
@@ -67,6 +74,13 @@ class FailingStreamCodexClient:
             '{"detail":"The gpt-5.5 model requires a newer version of Codex."}',
         )
         yield {}
+
+    def request_account_metadata(self) -> dict[str, str]:
+        """返回流式失败前已经选中的测试账户。"""
+        return {
+            "account_key": "account-a",
+            "account_alias": "owner@example.com",
+        }
 
 
 class UnavailableBoundAccountClient:
@@ -178,6 +192,13 @@ class FailingCreateCodexClient:
         """非流式测试不会使用这个方法。"""
         raise AssertionError("stream_response should not be called")
         yield {}
+
+    def request_account_metadata(self) -> dict[str, str]:
+        """返回非流式失败前已经选中的测试账户。"""
+        return {
+            "account_key": "account-a",
+            "account_alias": "owner@example.com",
+        }
 
 
 class FakeModelCatalog:
@@ -866,12 +887,18 @@ async def test_routes_apply_real_model_defaults_and_explicit_overrides(tmp_path:
     assert logs_by_path["/v1/chat/completions"]["reasoning_effort"] == "high"
     assert logs_by_path["/v1/chat/completions"]["fast_mode"] is True
     assert logs_by_path["/v1/chat/completions"]["service_tier"] == "priority"
+    assert logs_by_path["/v1/chat/completions"]["account_key"] == "account-a"
+    assert logs_by_path["/v1/chat/completions"]["account_alias"] == "owner@example.com"
     assert logs_by_path["/v1/responses"]["stream"] is False
     assert logs_by_path["/v1/responses"]["reasoning_effort"] == "low"
     assert logs_by_path["/v1/responses"]["fast_mode"] is False
     assert logs_by_path["/v1/responses"]["service_tier"] is None
+    assert logs_by_path["/v1/responses"]["account_key"] == "account-a"
+    assert logs_by_path["/v1/responses"]["account_alias"] == "owner@example.com"
     assert logs_by_path["/anthropic/v1/messages"]["reasoning_effort"] == "high"
     assert logs_by_path["/anthropic/v1/messages"]["fast_mode"] is True
+    assert logs_by_path["/anthropic/v1/messages"]["account_key"] == "account-a"
+    assert logs_by_path["/anthropic/v1/messages"]["account_alias"] == "owner@example.com"
 
 
 @pytest.mark.asyncio
@@ -1041,6 +1068,7 @@ async def test_responses_route_streams_sse_and_logs_final_usage(tmp_path: Path) 
             "/v1/responses",
             json={"model": "gpt-5.5", "input": "hello", "stream": True},
         )
+        request_logs = await client.get("/admin/requests")
 
     # httpx ASGITransport 会聚合 body，但内容仍是 SSE data 行。
     assert response.status_code == 200
@@ -1052,6 +1080,8 @@ async def test_responses_route_streams_sse_and_logs_final_usage(tmp_path: Path) 
     log_lines = (tmp_path / ".codex-usage" / "usage.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(log_lines) == 1
     assert json.loads(log_lines[0])["usage"]["output"] == 5
+    assert request_logs.json()["items"][0]["account_key"] == "account-a"
+    assert request_logs.json()["items"][0]["account_alias"] == "owner@example.com"
 
 
 @pytest.mark.asyncio
@@ -1133,6 +1163,8 @@ async def test_chat_stream_returns_sse_error_when_codex_rejects_request(tmp_path
     assert item["reasoning_effort"] == "low"
     assert item["fast_mode"] is True
     assert item["service_tier"] == "priority"
+    assert item["account_key"] == "account-a"
+    assert item["account_alias"] == "owner@example.com"
 
 
 @pytest.mark.asyncio
@@ -1165,3 +1197,5 @@ async def test_chat_non_stream_returns_json_error_when_codex_response_is_unexpec
     assert item["reasoning_effort"] == "medium"
     assert item["fast_mode"] is False
     assert item["service_tier"] is None
+    assert item["account_key"] == "account-a"
+    assert item["account_alias"] == "owner@example.com"

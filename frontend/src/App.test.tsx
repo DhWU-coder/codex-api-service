@@ -168,7 +168,9 @@ const requestLogItems = [
     stream: false,
     reasoning_effort: "medium",
     fast_mode: false,
-    service_tier: null
+    service_tier: null,
+    account_key: "account-a",
+    account_alias: "owner@example.com"
   }
 ];
 
@@ -801,6 +803,7 @@ describe("App theme mode", () => {
     expect(await screen.findByText("medium")).toBeTruthy();
     expect(await screen.findByText("关闭")).toBeTruthy();
     expect(await screen.findByText("标准")).toBeTruthy();
+    expect(await screen.findByText("owner@example.com")).toBeTruthy();
     expect(screen.queryByText("request id")).toBeNull();
 
     fireEvent.keyDown(window, { key: "Escape" });

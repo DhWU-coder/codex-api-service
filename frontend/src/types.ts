@@ -174,4 +174,6 @@ export type RequestLogItem = {
   reasoning_effort?: string | null;
   fast_mode?: boolean | null;
   service_tier?: string | null;
+  account_key?: string | null;
+  account_alias?: string | null;
 };

@@ -367,6 +367,8 @@ def test_request_log_persists_safe_policy_metadata(tmp_path: Path) -> None:
         reasoning_effort="high",
         fast_mode=True,
         service_tier="priority",
+        account_key="account-a",
+        account_alias="owner@example.com",
     )
 
     item = RequestLogStore(path=path).list_recent()[0]
@@ -374,6 +376,8 @@ def test_request_log_persists_safe_policy_metadata(tmp_path: Path) -> None:
     assert item["reasoning_effort"] == "high"
     assert item["fast_mode"] is True
     assert item["service_tier"] == "priority"
+    assert item["account_key"] == "account-a"
+    assert item["account_alias"] == "owner@example.com"
 
 
 def test_request_log_loads_legacy_entry_without_policy_metadata(tmp_path: Path) -> None:
@@ -404,6 +408,8 @@ def test_request_log_loads_legacy_entry_without_policy_metadata(tmp_path: Path) 
     assert item["reasoning_effort"] is None
     assert item["fast_mode"] is None
     assert item["service_tier"] is None
+    assert item["account_key"] is None
+    assert item["account_alias"] is None
 
 
 @pytest.mark.asyncio

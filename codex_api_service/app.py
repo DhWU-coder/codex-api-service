@@ -194,6 +194,7 @@ def create_app(
                 request_log=request_log,
                 started=started,
                 request_metadata=request_metadata,
+                client=client,
             )
         usage_logger.log(model=model, usage=codex_response.get("usage"), request_id=_request_id(codex_response))
         request_log.record(
@@ -205,6 +206,7 @@ def create_app(
             usage=codex_response.get("usage"),
             request_id=_request_id(codex_response),
             **request_metadata,
+            **_request_account_log_fields(client),
         )
         return JSONResponse(build_chat_completion(codex_response, model=model))
 
@@ -235,6 +237,7 @@ def create_app(
                 request_log=request_log,
                 started=started,
                 request_metadata=request_metadata,
+                client=client,
             )
         usage_logger.log(model=model, usage=codex_response.get("usage"), request_id=_request_id(codex_response))
         request_log.record(
@@ -246,6 +249,7 @@ def create_app(
             usage=codex_response.get("usage"),
             request_id=_request_id(codex_response),
             **request_metadata,
+            **_request_account_log_fields(client),
         )
         return JSONResponse(build_response_object(codex_response, model=model))
 
@@ -288,6 +292,7 @@ def create_app(
                 request_log=request_log,
                 started=started,
                 request_metadata=request_metadata,
+                client=client,
             )
         usage_logger.log(model=codex_model, usage=codex_response.get("usage"), request_id=_request_id(codex_response))
         request_log.record(
@@ -299,6 +304,7 @@ def create_app(
             usage=codex_response.get("usage"),
             request_id=_request_id(codex_response),
             **request_metadata,
+            **_request_account_log_fields(client),
         )
         return JSONResponse(build_anthropic_message(codex_response, model=requested_model))
 
@@ -819,6 +825,7 @@ async def _stream_chat_completion(
             duration_ms=_duration_ms(started),
             error=f"{error_code}: {message}" if error_code else message,
             **request_metadata,
+            **_request_account_log_fields(client),
         )
         yield _stream_error_sse(message=message, status_code=status_code, error_code=error_code)
         yield "data: [DONE]\n\n"
@@ -838,6 +845,7 @@ async def _stream_chat_completion(
             usage=completed_response.get("usage"),
             request_id=_request_id(completed_response),
             **request_metadata,
+            **_request_account_log_fields(client),
         )
     yield "data: [DONE]\n\n"
 
@@ -872,6 +880,7 @@ async def _stream_response(
             duration_ms=_duration_ms(started),
             error=f"{error_code}: {message}" if error_code else message,
             **request_metadata,
+            **_request_account_log_fields(client),
         )
         yield _stream_error_sse(message=message, status_code=status_code, error_code=error_code)
         yield "data: [DONE]\n\n"
@@ -891,6 +900,7 @@ async def _stream_response(
             usage=completed_response.get("usage"),
             request_id=_request_id(completed_response),
             **request_metadata,
+            **_request_account_log_fields(client),
         )
     yield "data: [DONE]\n\n"
 
@@ -949,6 +959,7 @@ async def _stream_anthropic_message(
             duration_ms=_duration_ms(started),
             error=message,
             **request_metadata,
+            **_request_account_log_fields(client),
         )
         if content_open:
             yield anthropic_content_block_stop_sse(index=content_index)
@@ -974,6 +985,7 @@ async def _stream_anthropic_message(
             usage=completed_response.get("usage"),
             request_id=_request_id(completed_response),
             **request_metadata,
+            **_request_account_log_fields(client),
         )
         yield anthropic_message_delta_sse(
             usage=completed_response.get("usage"),
@@ -990,6 +1002,27 @@ def _request_id(response: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _request_account_log_fields(client: Any) -> dict[str, str]:
+    """从账户感知客户端读取允许写入日志的安全账户字段。"""
+    metadata_getter = getattr(client, "request_account_metadata", None)
+    if not callable(metadata_getter):
+        return {}
+    try:
+        metadata = metadata_getter()
+    except Exception:
+        # 日志辅助信息不能反过来影响正常 API 响应。
+        return {}
+    if not isinstance(metadata, dict):
+        return {}
+
+    safe_fields: dict[str, str] = {}
+    for field_name in ("account_key", "account_alias"):
+        value = metadata.get(field_name)
+        if isinstance(value, str) and value.strip():
+            safe_fields[field_name] = value.strip()
+    return safe_fields
+
+
 def _raise_non_stream_error(
     *,
     error: Exception,
@@ -999,6 +1032,7 @@ def _raise_non_stream_error(
     request_log: RequestLogStore,
     started: float,
     request_metadata: dict[str, Any],
+    client: Any,
 ) -> None:
     """记录非流式请求错误，并转换成 OpenAI 客户端可读的 JSON HTTP 错误。"""
     # 非流式响应尚未发送，可以直接使用正确 HTTP 状态码和 JSON detail。
@@ -1013,6 +1047,7 @@ def _raise_non_stream_error(
         duration_ms=_duration_ms(started),
         error=f"{error_code}: {message}" if error_code else message,
         **request_metadata,
+        **_request_account_log_fields(client),
     )
     raise HTTPException(
         status_code=status_code,

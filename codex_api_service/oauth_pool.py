@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,11 @@ class OAuthAccountPool:
         self._initialize_lock = asyncio.Lock()
         self._initialized = False
         self._background_task: asyncio.Task[None] | None = None
+        # ContextVar 让同一账户池处理并发请求时，各请求读取到自己的账户信息。
+        self._request_account: ContextVar[dict[str, str] | None] = ContextVar(
+            f"oauth_request_account_{id(self)}",
+            default=None,
+        )
 
     async def ensure_initialized(self) -> None:
         """首次请求时同步当前登录并构建账号客户端。"""
@@ -75,6 +81,7 @@ class OAuthAccountPool:
 
     async def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
         """为非流式请求选择账号并聚合响应。"""
+        self._request_account.set(None)
         await self.ensure_initialized()
         bound = self._bound_account(payload)
         upstream_payload = self._upstream_payload(payload)
@@ -87,6 +94,7 @@ class OAuthAccountPool:
             )
             attempted.add(lease.account_key)
             runtime = self.runtimes[lease.account_key]
+            self._set_request_account(runtime.record)
             try:
                 response = await runtime.client.create_response(upstream_payload)
                 self._remember_response(response, runtime.record.key)
@@ -104,6 +112,7 @@ class OAuthAccountPool:
 
     async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         """为流式请求选择账号，并在流结束时释放并发槽。"""
+        self._request_account.set(None)
         await self.ensure_initialized()
         bound = self._bound_account(payload)
         upstream_payload = self._upstream_payload(payload)
@@ -113,6 +122,7 @@ class OAuthAccountPool:
             lease = await self.scheduler.acquire(bound_account_key=bound, excluded_account_keys=attempted)
             attempted.add(lease.account_key)
             runtime = self.runtimes[lease.account_key]
+            self._set_request_account(runtime.record)
             emitted = False
             try:
                 async for event in runtime.client.stream_response(upstream_payload):
@@ -132,6 +142,11 @@ class OAuthAccountPool:
         if last_error is not None:
             raise last_error
         raise OAuthLoginRequired("No available OAuth accounts")
+
+    def request_account_metadata(self) -> dict[str, str] | None:
+        """返回当前请求最后一次实际选中账户的安全元数据。"""
+        metadata = self._request_account.get()
+        return dict(metadata) if metadata is not None else None
 
     async def sync_global(self) -> OAuthAccountRecord | None:
         """强制同步全局 Codex 登录并刷新运行账号集合。"""
@@ -331,6 +346,15 @@ class OAuthAccountPool:
         response_id = response.get("id")
         if isinstance(response_id, str) and response_id:
             self.bindings.bind(response_id, account_key)
+
+    def _set_request_account(self, record: OAuthAccountRecord) -> None:
+        """把已选账户写入当前异步请求上下文。"""
+        self._request_account.set(
+            {
+                "account_key": record.key,
+                "account_alias": record.alias,
+            }
+        )
 
     @staticmethod
     def _primary_window(usage: dict[str, Any] | None) -> dict[str, Any]:
