@@ -1,5 +1,6 @@
 import json
 
+import codex_api_service.openai_compat as openai_compat
 from codex_api_service.openai_compat import (
     build_chat_completion,
     build_chat_stream_events,
@@ -28,6 +29,86 @@ def test_chat_messages_to_codex_input_uses_role_specific_text_block_types() -> N
         {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
         {"role": "assistant", "content": [{"type": "output_text", "text": "hi"}]},
     ]
+
+
+def test_chat_messages_to_codex_input_preserves_tool_call_history() -> None:
+    """验证 Chat 工具调用历史会转换成 Responses 顶层工具 item。"""
+    # Claudish 会把 Claude tool_use/tool_result 转换成 assistant tool_calls 和 role=tool。
+    messages = [
+        {
+            "role": "assistant",
+            "content": "我来读取",
+            "tool_calls": [
+                {
+                    "id": "call_read_1",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": '{"file_path":"/tmp/demo"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_read_1", "content": "README content"},
+    ]
+
+    codex_input = chat_messages_to_codex_input(messages)
+
+    assert codex_input == [
+        {"role": "assistant", "content": [{"type": "output_text", "text": "我来读取"}]},
+        {
+            "type": "function_call",
+            "call_id": "call_read_1",
+            "name": "Read",
+            "arguments": '{"file_path":"/tmp/demo"}',
+        },
+        {"type": "function_call_output", "call_id": "call_read_1", "output": "README content"},
+    ]
+
+
+def test_openai_tools_to_codex_tools_flattens_function_schema() -> None:
+    """验证 Chat function tools 会转换成 Responses function tools。"""
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "Read",
+                "description": "读取文件",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"file_path": {"type": "string"}},
+                    "required": ["file_path"],
+                },
+                "strict": True,
+            },
+        },
+        {"type": "custom", "name": "ignored"},
+    ]
+
+    converted = openai_compat.openai_tools_to_codex_tools(tools)
+
+    assert converted == [
+        {
+            "type": "function",
+            "name": "Read",
+            "description": "读取文件",
+            "parameters": {
+                "type": "object",
+                "properties": {"file_path": {"type": "string"}},
+                "required": ["file_path"],
+            },
+            "strict": True,
+        }
+    ]
+
+
+def test_openai_tool_choice_to_codex_tool_choice_flattens_forced_function() -> None:
+    """验证 Chat 强制函数选择会转换成 Responses tool_choice。"""
+    forced = {"type": "function", "function": {"name": "Read"}}
+
+    assert openai_compat.openai_tool_choice_to_codex_tool_choice("auto") == "auto"
+    assert openai_compat.openai_tool_choice_to_codex_tool_choice("required") == "required"
+    assert openai_compat.openai_tool_choice_to_codex_tool_choice(forced) == {
+        "type": "function",
+        "name": "Read",
+    }
 
 
 def test_normalize_responses_input_uses_assistant_output_text_blocks() -> None:
@@ -95,6 +176,41 @@ def test_build_chat_completion_maps_codex_response_to_openai_shape() -> None:
     }
 
 
+def test_build_chat_completion_maps_function_calls_to_openai_tool_calls() -> None:
+    """验证非流式 Codex function_call 会变成 ChatCompletion tool_calls。"""
+    completion = build_chat_completion(
+        codex_response={
+            "id": "resp_tool",
+            "output": [
+                {
+                    "id": "fc_read_1",
+                    "type": "function_call",
+                    "call_id": "call_read_1",
+                    "name": "Read",
+                    "arguments": '{"file_path":"/tmp/demo"}',
+                    "status": "completed",
+                }
+            ],
+            "usage": {"input_tokens": 20, "output_tokens": 8, "total_tokens": 28},
+        },
+        model="gpt-5.5",
+    )
+
+    choice = completion["choices"][0]
+    assert choice["message"] == {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call_read_1",
+                "type": "function",
+                "function": {"name": "Read", "arguments": '{"file_path":"/tmp/demo"}'},
+            }
+        ],
+    }
+    assert choice["finish_reason"] == "tool_calls"
+
+
 def test_build_response_object_keeps_responses_shape() -> None:
     """验证 /v1/responses 非流式结果保持 Responses API 风格。"""
     # Codex response 的 id 和 usage 应被保留或规范化。
@@ -133,6 +249,52 @@ def test_build_chat_stream_events_emits_delta_usage_and_done() -> None:
     assert json.loads(events[2][len("data: ") :].strip())["choices"] == []
     assert json.loads(events[2][len("data: ") :].strip())["usage"]["total_tokens"] == 15
     assert events[3] == "data: [DONE]\n\n"
+
+
+def test_build_chat_tool_call_sse_emits_openai_delta_shape() -> None:
+    """验证完整 Codex function_call 会编码成 OpenAI 流式 tool_calls delta。"""
+    event = openai_compat.build_chat_tool_call_sse(
+        response_id="resp_tool",
+        model="gpt-5.5",
+        function_call={
+            "call_id": "call_read_1",
+            "name": "Read",
+            "arguments": '{"file_path":"/tmp/demo"}',
+        },
+        index=0,
+        created=123,
+    )
+
+    payload = json.loads(event.removeprefix("data: "))
+    assert payload["choices"] == [
+        {
+            "index": 0,
+            "delta": {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_read_1",
+                        "type": "function",
+                        "function": {"name": "Read", "arguments": '{"file_path":"/tmp/demo"}'},
+                    }
+                ]
+            },
+            "finish_reason": None,
+        }
+    ]
+
+
+def test_build_chat_finish_sse_emits_tool_calls_reason() -> None:
+    """验证 Chat 流会在 usage 前发送明确的工具调用结束原因。"""
+    event = openai_compat.build_chat_finish_sse(
+        response_id="resp_tool",
+        model="gpt-5.5",
+        finish_reason="tool_calls",
+        created=123,
+    )
+
+    payload = json.loads(event.removeprefix("data: "))
+    assert payload["choices"] == [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
 
 
 def test_encode_sse_serializes_data_events() -> None:

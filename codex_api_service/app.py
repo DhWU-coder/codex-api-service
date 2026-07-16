@@ -50,6 +50,8 @@ from .model_catalog import (
 from .openai_compat import (
     build_chat_completion,
     build_chat_delta_sse,
+    build_chat_finish_sse,
+    build_chat_tool_call_sse,
     build_chat_usage_sse,
     build_response_object,
     chat_messages_to_codex_input,
@@ -57,6 +59,8 @@ from .openai_compat import (
     codex_event_text_delta,
     encode_sse,
     normalize_responses_input,
+    openai_tool_choice_to_codex_tool_choice,
+    openai_tools_to_codex_tools,
     response_stream_event,
 )
 from .oauth_pool import OAuthAccountPool
@@ -655,6 +659,14 @@ def _chat_body_to_codex_payload(body: dict[str, Any], config: AppConfig, model: 
         raise HTTPException(status_code=400, detail="messages must be a list")
     payload = _base_codex_payload(config, model, body)
     payload["input"] = chat_messages_to_codex_input(messages)
+    tools = openai_tools_to_codex_tools(body.get("tools"))
+    if tools:
+        payload["tools"] = tools
+    tool_choice = openai_tool_choice_to_codex_tool_choice(body.get("tool_choice"))
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
+    if isinstance(body.get("parallel_tool_calls"), bool):
+        payload["parallel_tool_calls"] = body["parallel_tool_calls"]
     return payload
 
 
@@ -730,6 +742,8 @@ async def _stream_chat_completion(
     """把 Codex SSE 转成 Chat Completions SSE。"""
     response_id = "resp_stream"
     created = int(time.time())
+    emitted_tool_call_ids: set[str] = set()
+    tool_call_index = 0
     completed_response: dict[str, Any] | None = None
     try:
         async for event in client.stream_response(payload):
@@ -737,9 +751,57 @@ async def _stream_chat_completion(
             if completed is not None:
                 completed_response = completed
                 response_id = str(completed.get("id") or response_id)
+                completion = build_chat_completion(completed, model=model)
+                completed_message = completion["choices"][0]["message"]
+                for tool_call in completed_message.get("tool_calls", []):
+                    call_id = tool_call.get("id")
+                    if not isinstance(call_id, str) or call_id in emitted_tool_call_ids:
+                        continue
+                    function = tool_call.get("function")
+                    if not isinstance(function, dict):
+                        continue
+                    yield build_chat_tool_call_sse(
+                        response_id=response_id,
+                        model=model,
+                        function_call={
+                            "call_id": call_id,
+                            "name": function.get("name"),
+                            "arguments": function.get("arguments"),
+                        },
+                        index=tool_call_index,
+                        created=created,
+                    )
+                    emitted_tool_call_ids.add(call_id)
+                    tool_call_index += 1
+                finish_reason = (
+                    "tool_calls"
+                    if emitted_tool_call_ids
+                    else completion["choices"][0]["finish_reason"]
+                )
+                yield build_chat_finish_sse(
+                    response_id=response_id,
+                    model=model,
+                    finish_reason=finish_reason,
+                    created=created,
+                )
                 usage = completed.get("usage")
                 if isinstance(usage, dict):
                     yield build_chat_usage_sse(response_id=response_id, model=model, usage=usage, created=created)
+                continue
+            function_call = codex_event_function_call(event)
+            if function_call is not None:
+                call_id = function_call.get("call_id") or function_call.get("id")
+                call_key = call_id if isinstance(call_id, str) else "call_local"
+                if call_key not in emitted_tool_call_ids:
+                    yield build_chat_tool_call_sse(
+                        response_id=response_id,
+                        model=model,
+                        function_call=function_call,
+                        index=tool_call_index,
+                        created=created,
+                    )
+                    emitted_tool_call_ids.add(call_key)
+                    tool_call_index += 1
                 continue
             delta = codex_event_text_delta(event)
             if delta is not None:

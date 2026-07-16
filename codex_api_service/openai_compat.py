@@ -12,11 +12,58 @@ def chat_messages_to_codex_input(messages: list[dict[str, Any]]) -> list[dict[st
     """把 Chat Completions messages 转成 Codex Responses input。"""
     codex_messages: list[dict[str, Any]] = []
     for message in messages:
-        # Codex backend 接受 user/system/developer 这类 Responses input role。
         role = str(message.get("role") or "user")
-        content = _content_to_text_blocks(message.get("content", ""), role=role)
-        codex_messages.append({"role": role, "content": content})
+        if role == "tool":
+            tool_output = _chat_tool_message_to_codex_output(message)
+            if tool_output is not None:
+                codex_messages.append(tool_output)
+            continue
+
+        # Codex backend 接受 user/system/developer 这类 Responses input role。
+        content = message.get("content")
+        if content is not None:
+            blocks = _content_to_text_blocks(content, role=role)
+            if blocks:
+                codex_messages.append({"role": role, "content": blocks})
+        if role == "assistant":
+            codex_messages.extend(_chat_tool_calls_to_codex_items(message.get("tool_calls")))
     return codex_messages
+
+
+def openai_tools_to_codex_tools(tools: Any) -> list[dict[str, Any]]:
+    """把 OpenAI Chat function tools 转成 Responses function tools。"""
+    if not isinstance(tools, list):
+        return []
+    codex_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict) or not isinstance(function.get("name"), str):
+            continue
+        codex_tool: dict[str, Any] = {
+            "type": "function",
+            "name": function["name"],
+            "parameters": function.get("parameters") if isinstance(function.get("parameters"), dict) else {},
+        }
+        if isinstance(function.get("description"), str):
+            codex_tool["description"] = function["description"]
+        if isinstance(function.get("strict"), bool):
+            codex_tool["strict"] = function["strict"]
+        codex_tools.append(codex_tool)
+    return codex_tools
+
+
+def openai_tool_choice_to_codex_tool_choice(tool_choice: Any) -> Any:
+    """把 OpenAI Chat tool_choice 转成 Responses tool_choice。"""
+    if isinstance(tool_choice, str):
+        return tool_choice
+    if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
+        return None
+    function = tool_choice.get("function")
+    if not isinstance(function, dict) or not isinstance(function.get("name"), str):
+        return None
+    return {"type": "function", "name": function["name"]}
 
 
 def normalize_responses_input(value: Any) -> Any:
@@ -60,6 +107,13 @@ def build_chat_completion(codex_response: dict[str, Any], *, model: str) -> dict
     # 使用上游 id 派生 chat completion id，便于日志和客户端排查问题。
     response_id = str(codex_response.get("id") or _new_response_id())
     text = extract_output_text(codex_response)
+    tool_calls = _codex_response_to_openai_tool_calls(codex_response)
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": text if text or not tool_calls else None,
+    }
+    if tool_calls:
+        message["tool_calls"] = tool_calls
     return {
         "id": f"chatcmpl-{response_id}",
         "object": "chat.completion",
@@ -68,11 +122,38 @@ def build_chat_completion(codex_response: dict[str, Any], *, model: str) -> dict
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": _finish_reason(codex_response),
+                "message": message,
+                "finish_reason": "tool_calls" if tool_calls else _finish_reason(codex_response),
             }
         ],
         "usage": _chat_usage(codex_response.get("usage")),
+    }
+
+
+def _codex_response_to_openai_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """把 Codex response 中的 function_call 输出转换成 OpenAI tool_calls。"""
+    output = response.get("output")
+    if not isinstance(output, list):
+        return []
+    tool_calls: list[dict[str, Any]] = []
+    for item in output:
+        if isinstance(item, dict) and item.get("type") == "function_call":
+            tool_calls.append(_codex_function_call_to_openai_tool_call(item))
+    return tool_calls
+
+
+def _codex_function_call_to_openai_tool_call(function_call: dict[str, Any]) -> dict[str, Any]:
+    """把单个 Responses function_call 转成 ChatCompletion tool call。"""
+    call_id = function_call.get("call_id") or function_call.get("id")
+    name = function_call.get("name")
+    arguments = function_call.get("arguments")
+    return {
+        "id": call_id if isinstance(call_id, str) else "call_local",
+        "type": "function",
+        "function": {
+            "name": name if isinstance(name, str) else "tool",
+            "arguments": arguments if isinstance(arguments, str) else _json_text(arguments or {}),
+        },
     }
 
 
@@ -146,6 +227,55 @@ def build_chat_delta_sse(*, response_id: str, model: str, delta: str, created: i
     )
 
 
+def build_chat_tool_call_sse(
+    *,
+    response_id: str,
+    model: str,
+    function_call: dict[str, Any],
+    index: int,
+    created: int | None = None,
+) -> str:
+    """构造单条 Chat Completions 工具调用增量 SSE。"""
+    tool_call = _codex_function_call_to_openai_tool_call(function_call)
+    tool_call["index"] = index
+    return encode_sse(
+        {
+            "id": f"chatcmpl-{response_id}",
+            "object": "chat.completion.chunk",
+            "created": created or int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"tool_calls": [tool_call]},
+                    "finish_reason": None,
+                }
+            ],
+            "usage": None,
+        }
+    )
+
+
+def build_chat_finish_sse(
+    *,
+    response_id: str,
+    model: str,
+    finish_reason: str,
+    created: int | None = None,
+) -> str:
+    """构造 Chat Completions 流式结束原因 SSE。"""
+    return encode_sse(
+        {
+            "id": f"chatcmpl-{response_id}",
+            "object": "chat.completion.chunk",
+            "created": created or int(time.time()),
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+            "usage": None,
+        }
+    )
+
+
 def build_chat_usage_sse(*, response_id: str, model: str, usage: dict[str, Any], created: int | None = None) -> str:
     """构造 Chat Completions 流式结尾 usage SSE。"""
     # OpenAI 的 usage chunk 约定 choices 为空数组。
@@ -187,6 +317,72 @@ def response_stream_event(event: dict[str, Any]) -> str:
     """把 Codex Responses SSE 事件转成 /v1/responses SSE。"""
     # Codex backend 已经使用 Responses 风格事件名，所以这里只做安全 JSON 编码。
     return encode_sse(event)
+
+
+def _chat_tool_calls_to_codex_items(tool_calls: Any) -> list[dict[str, Any]]:
+    """把 assistant tool_calls 历史转换成 Responses function_call items。"""
+    if not isinstance(tool_calls, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict) or tool_call.get("type") != "function":
+            continue
+        function = tool_call.get("function")
+        call_id = tool_call.get("id")
+        if not isinstance(function, dict) or not isinstance(call_id, str):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str):
+            continue
+        arguments = function.get("arguments")
+        if not isinstance(arguments, str):
+            arguments = _json_text(arguments if arguments is not None else {})
+        items.append(
+            {
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments,
+            }
+        )
+    return items
+
+
+def _chat_tool_message_to_codex_output(message: dict[str, Any]) -> dict[str, Any] | None:
+    """把 role=tool 消息转换成 Responses function_call_output。"""
+    call_id = message.get("tool_call_id")
+    if not isinstance(call_id, str):
+        return None
+    return {
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": _chat_tool_output_text(message.get("content")),
+    }
+
+
+def _chat_tool_output_text(content: Any) -> str:
+    """把 Chat 工具结果内容转换成 Codex 可消费的字符串。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                texts.append(part)
+            elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                texts.append(part["text"])
+        return "\n".join(texts)
+    if content is None:
+        return ""
+    return _json_text(content)
+
+
+def _json_text(value: Any) -> str:
+    """把兼容输入稳定序列化成紧凑 JSON，失败时回退到字符串。"""
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _content_to_input_blocks(content: Any) -> list[dict[str, Any]]:

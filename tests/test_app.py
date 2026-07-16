@@ -90,8 +90,24 @@ class ToolStreamCodexClient:
         self.payloads: list[dict[str, Any]] = []
 
     async def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """流式测试不会使用这个方法。"""
-        raise AssertionError("create_response should not be called")
+        """返回固定 function_call，供非流式工具响应测试复用。"""
+        self.payloads.append(payload)
+        return {
+            "id": "resp_tool",
+            "object": "response",
+            "status": "completed",
+            "output": [
+                {
+                    "id": "fc_1",
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "get_weather",
+                    "arguments": '{"city":"杭州"}',
+                    "status": "completed",
+                }
+            ],
+            "usage": {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
+        }
 
     async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         """返回 function_call 事件和最终 completed 响应。"""
@@ -117,6 +133,31 @@ class ToolStreamCodexClient:
                         "arguments": '{"city":"杭州"}',
                     }
                 ],
+                "usage": {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
+            },
+        }
+
+
+class ToolEventOnlyStreamCodexClient(ToolStreamCodexClient):
+    """模拟 completed 响应不再重复携带已发送工具项的情况。"""
+
+    async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        """先发送完整工具事件，再发送不含 output 的完成事件。"""
+        self.payloads.append(payload)
+        yield {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "get_weather",
+                "arguments": '{"city":"杭州"}',
+            },
+        }
+        yield {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_tool",
+                "output": [],
                 "usage": {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
             },
         }
@@ -304,6 +345,34 @@ async def test_chat_completions_route_returns_openai_completion_and_logs_usage(t
     log_lines = (tmp_path / ".codex-usage" / "usage.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(log_lines) == 1
     assert json.loads(log_lines[0])["usage"]["total"] == 15
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_route_returns_non_stream_tool_calls(tmp_path: Path) -> None:
+    """验证非流式 Chat 路由返回标准 OpenAI tool_calls。"""
+    fake_client = ToolStreamCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-5.5", "messages": [{"role": "user", "content": "查天气"}]},
+        )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["message"] == {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": '{"city":"杭州"}'},
+            }
+        ],
+    }
+    assert choice["finish_reason"] == "tool_calls"
 
 
 @pytest.mark.asyncio
@@ -570,6 +639,107 @@ async def test_v2_messages_route_is_removed(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_completions_streams_openai_tool_call_chunks(tmp_path: Path) -> None:
+    """验证 Chat 流式响应会输出 Claudish 可解析的 tool_calls。"""
+    fake_client = ToolEventOnlyStreamCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-5.5",
+                "stream": True,
+                "messages": [{"role": "user", "content": "查天气"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    chunks = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: {")
+    ]
+    tool_chunks = [
+        chunk
+        for chunk in chunks
+        if chunk.get("choices") and chunk["choices"][0]["delta"].get("tool_calls")
+    ]
+    assert tool_chunks[0]["choices"][0]["delta"]["tool_calls"] == [
+        {
+            "index": 0,
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"city":"杭州"}'},
+        }
+    ]
+    finish_reasons = [chunk["choices"][0]["finish_reason"] for chunk in chunks if chunk.get("choices")]
+    assert "tool_calls" in finish_reasons
+    assert response.text.rstrip().endswith("data: [DONE]")
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_forwards_openai_tools_to_codex_payload(tmp_path: Path) -> None:
+    """验证 Chat 工具配置会转换并进入 Codex Responses payload。"""
+    fake_client = FakeCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-5.5",
+                "messages": [{"role": "user", "content": "读取文件"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "Read",
+                            "description": "读取文件",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"file_path": {"type": "string"}},
+                                "required": ["file_path"],
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": {"type": "function", "function": {"name": "Read"}},
+                "parallel_tool_calls": False,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = fake_client.payloads[0]
+    assert payload["tools"] == [
+        {
+            "type": "function",
+            "name": "Read",
+            "description": "读取文件",
+            "parameters": {
+                "type": "object",
+                "properties": {"file_path": {"type": "string"}},
+                "required": ["file_path"],
+            },
+        }
+    ]
+    assert payload["tool_choice"] == {"type": "function", "name": "Read"}
+    assert payload["parallel_tool_calls"] is False
+
+
+@pytest.mark.asyncio
 async def test_chat_completions_does_not_forward_unsupported_openai_compat_fields(tmp_path: Path) -> None:
     """验证常见 OpenAI SDK 参数不会原样透传给 Codex backend。"""
     # fake client 记录 payload，便于确认兼容参数被本地服务消化掉。
@@ -594,9 +764,6 @@ async def test_chat_completions_does_not_forward_unsupported_openai_compat_field
         "n": 1,
         "user": "local-user",
         "metadata": {"trace": "abc"},
-        "tools": [{"type": "function", "function": {"name": "noop", "parameters": {}}}],
-        "tool_choice": "auto",
-        "parallel_tool_calls": True,
     }
 
     # 请求应仍然成功，服务只把 Codex backend 真正支持的字段发给上游。

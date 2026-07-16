@@ -203,10 +203,15 @@ npm --prefix frontend run build
 `fast_mode` 或 `service_tier` 临时覆盖模型缺省值。
 服务会把快速模式映射成当前 Codex OAuth backend 可用的 `service_tier="priority"`。
 
-兼容层会接收 OpenAI SDK 常见参数，例如 `temperature`、`top_p`、`max_tokens`、
-`max_output_tokens`、`response_format`、`tools`、`tool_choice`、`stop`、`seed` 和
-penalty 参数。Codex OAuth backend 当前不支持这些采样、工具和格式参数，所以服务会本地忽略它们，
-避免上游返回 `Unsupported parameter`。
+兼容层会接收 OpenAI SDK 常见参数。`temperature`、`top_p`、`max_tokens`、
+`max_output_tokens`、`response_format`、`stop`、`seed` 和 penalty 等 Codex OAuth backend
+当前不支持的采样或格式参数会在本地忽略，避免上游返回 `Unsupported parameter`。
+
+`/v1/chat/completions` 支持 function tools：`tools`、`tool_choice` 和布尔型
+`parallel_tool_calls` 会转换成 Codex Responses payload；历史 assistant `tool_calls` 与
+`role="tool"` 消息会转换成 `function_call` 和 `function_call_output`。模型调用工具时，
+非流式响应返回 `message.tool_calls`，流式响应返回 `delta.tool_calls` 并以
+`finish_reason="tool_calls"` 结束该轮。
 
 ```python
 from openai import OpenAI
