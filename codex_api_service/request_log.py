@@ -27,6 +27,10 @@ class RequestLogEntry:
     usage: dict[str, int] | None = None
     request_id: str | None = None
     error: str | None = None
+    stream: bool | None = None
+    reasoning_effort: str | None = None
+    fast_mode: bool | None = None
+    service_tier: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换成 JSON 响应可序列化的 dict。"""
@@ -41,6 +45,10 @@ class RequestLogEntry:
             "usage": self.usage,
             "request_id": self.request_id,
             "error": self.error,
+            "stream": self.stream,
+            "reasoning_effort": self.reasoning_effort,
+            "fast_mode": self.fast_mode,
+            "service_tier": self.service_tier,
         }
 
 
@@ -68,6 +76,10 @@ class RequestLogStore:
         usage: dict[str, Any] | None = None,
         request_id: str | None = None,
         error: str | None = None,
+        stream: bool | None = None,
+        reasoning_effort: str | None = None,
+        fast_mode: bool | None = None,
+        service_tier: str | None = None,
     ) -> RequestLogEntry:
         """追加一条请求元数据日志。"""
         # usage 统一映射到 codex-usage 的字段，方便前端直接显示。
@@ -83,6 +95,10 @@ class RequestLogStore:
             usage=normalized_usage,
             request_id=request_id,
             error=error,
+            stream=stream,
+            reasoning_effort=reasoning_effort,
+            fast_mode=fast_mode,
+            service_tier=service_tier,
         )
         self._items.appendleft(entry)
         self._append_persisted_entry(entry)
@@ -186,6 +202,12 @@ def _entry_from_dict(item: dict[str, Any]) -> RequestLogEntry | None:
             usage=item["usage"] if isinstance(item.get("usage"), dict) else None,
             request_id=item["request_id"] if isinstance(item.get("request_id"), str) else None,
             error=item["error"] if isinstance(item.get("error"), str) else None,
+            stream=item["stream"] if isinstance(item.get("stream"), bool) else None,
+            reasoning_effort=(
+                item["reasoning_effort"] if isinstance(item.get("reasoning_effort"), str) else None
+            ),
+            fast_mode=item["fast_mode"] if isinstance(item.get("fast_mode"), bool) else None,
+            service_tier=item["service_tier"] if isinstance(item.get("service_tier"), str) else None,
         )
     except (KeyError, TypeError, ValueError):
         return None

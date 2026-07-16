@@ -170,4 +170,8 @@ export type RequestLogItem = {
   usage: { total: number; input: number; cached: number; output: number; reasoning: number } | null;
   request_id: string | null;
   error: string | null;
+  stream?: boolean | null;
+  reasoning_effort?: string | null;
+  fast_mode?: boolean | null;
+  service_tier?: string | null;
 };

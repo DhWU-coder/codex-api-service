@@ -39,6 +39,7 @@ import {
   startOAuthLogin,
   fetchOAuthLoginStatus,
   parseChatStreamLine,
+  refreshOAuthAccounts,
   reloadCodexAuth,
   saveAdminConfig
 } from "./api";
@@ -603,7 +604,7 @@ export function App() {
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
   const [logSearch, setLogSearch] = useState("");
   const [logStatusFilter, setLogStatusFilter] = useState("all");
-  const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
+  const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
   const [logScrollTop, setLogScrollTop] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
@@ -721,6 +722,23 @@ export function App() {
       setIsLoadingOauthAccounts(false);
     }
   }, [apiKey]);
+
+  // 手动刷新时更新页面当前实际展示的数据源，多账号模式由后端批量强刷。
+  const refreshQuotaStatus = useCallback(async () => {
+    try {
+      setCodexUsageError("");
+      setIsLoadingCodexUsage(true);
+      if (oauthAccounts?.accounts.length) {
+        setOauthAccounts(await refreshOAuthAccounts(apiKey));
+      } else {
+        setCodexUsage(await fetchCodexUsage(apiKey));
+      }
+    } catch (caught) {
+      setCodexUsageError(caught instanceof Error ? caught.message : "额度状态刷新失败");
+    } finally {
+      setIsLoadingCodexUsage(false);
+    }
+  }, [apiKey, oauthAccounts]);
 
   const syncAccounts = useCallback(async () => {
     try {
@@ -1096,29 +1114,42 @@ export function App() {
     () => summarizeRequestLogs(filteredLogs, { preset: "all" }),
     [filteredLogs]
   );
-  const expandedLogIndex = useMemo(
-    () => filteredLogs.findIndex((item) => item.id === expandedLogId),
-    [expandedLogId, filteredLogs]
+  const selectedLog = useMemo(
+    () => logs.find((item) => item.id === selectedLogId) || null,
+    [logs, selectedLogId]
   );
   const virtualLogWindow = useMemo(
     () =>
       calculateVirtualLogWindow({
         itemCount: filteredLogs.length,
         scrollTop: logScrollTop,
-        viewportHeight: 512,
-        expandedIndex: expandedLogIndex >= 0 ? expandedLogIndex : undefined
+        viewportHeight: 512
       }),
-    [expandedLogIndex, filteredLogs.length, logScrollTop]
+    [filteredLogs.length, logScrollTop]
   );
 
   // 日志集合或筛选条件变化后回到顶部，避免旧滚动位置落到空白区域。
   useEffect(() => {
     setLogScrollTop(0);
-    setExpandedLogId(null);
+    setSelectedLogId(null);
     if (logScrollRef.current) {
       logScrollRef.current.scrollTop = 0;
     }
   }, [logSearch, logStatusFilter, logs]);
+
+  // 请求详情打开时支持 Escape 关闭，并在组件更新时清理监听。
+  useEffect(() => {
+    if (!selectedLogId) {
+      return;
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelectedLogId(null);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [selectedLogId]);
 
   // 切换加载数量时立即读取对应范围，全部模式仍由虚拟列表控制 DOM 数量。
   const changeRequestLogLimit = useCallback(
@@ -1612,17 +1643,24 @@ export function App() {
               <div className="virtual-log-spacer" style={{ height: virtualLogWindow.totalHeight }}>
                 {virtualLogWindow.items.map((virtualItem) => {
                   const item = filteredLogs[virtualItem.index];
-                  const isExpanded = expandedLogId === item.id;
+                  const isSelected = selectedLogId === item.id;
                   return (
                     <div
-                      className={`virtual-log-item${isExpanded ? " expanded" : ""}`}
+                      className={`virtual-log-item${isSelected ? " selected" : ""}`}
                       key={item.id}
                       role="row"
                       style={{ height: virtualItem.height, transform: `translateY(${virtualItem.top}px)` }}
                     >
                       <div
                         className="virtual-log-grid virtual-log-main"
-                        onClick={() => setExpandedLogId(isExpanded ? null : item.id)}
+                        onClick={() => setSelectedLogId(item.id)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            setSelectedLogId(item.id);
+                          }
+                        }}
+                        tabIndex={0}
                       >
                         <div role="cell">{new Date(item.timestamp).toLocaleTimeString()}</div>
                         <div role="cell">{item.path}</div>
@@ -1639,14 +1677,6 @@ export function App() {
                         <div role="cell">{item.usage?.reasoning ?? "-"}</div>
                         <div className="error-cell" role="cell">{item.error || "-"}</div>
                       </div>
-                      {isExpanded ? (
-                        <div className="log-detail">
-                          <span>request id</span>
-                          <strong>{item.request_id || "-"}</strong>
-                          <span>错误</span>
-                          <strong>{item.error || "-"}</strong>
-                        </div>
-                      ) : null}
                     </div>
                   );
                 })}
@@ -2135,9 +2165,9 @@ export function App() {
                 <h2>额度状态</h2>
                 <p>当前 Codex OAuth 账号的 5h 和 weekly 额度窗口。</p>
               </div>
-              <button className="secondary-button" onClick={() => void loadCodexUsage()} disabled={isLoadingCodexUsage}>
+              <button className="secondary-button" onClick={() => void refreshQuotaStatus()} disabled={isLoadingCodexUsage}>
                 <RefreshCw size={16} />
-                {isLoadingCodexUsage ? "加载中" : "刷新"}
+                {isLoadingCodexUsage ? "刷新中…" : "刷新"}
               </button>
             </header>
 
@@ -2161,6 +2191,12 @@ export function App() {
                       <div><h3>{account.alias}</h3><p><strong>{formatPlanType(account.usage?.planType || "-")}</strong> · 预计占比 {Math.round(account.estimatedShare * 100)}%</p></div>
                       <span className="status-badge ok">{account.status}</span>
                     </div>
+                    {account.lastError ? (
+                      <div className="banner error">
+                        <AlertTriangle size={18} />
+                        {account.lastError}
+                      </div>
+                    ) : null}
                     {account.usage ? <UsageLimitCard title="Codex 主额度" rateLimit={account.usage.rateLimit} /> : null}
                     {account.usage?.additionalRateLimits.map((item) => (
                       <UsageLimitCard key={item.meteredFeature || item.limitName} title={item.limitName} rateLimit={item.rateLimit} />
@@ -2205,6 +2241,108 @@ export function App() {
           </section>
         ) : null}
       </main>
+
+      {selectedLog ? (
+        <div
+          className="request-log-drawer-backdrop"
+          data-testid="request-log-drawer-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setSelectedLogId(null);
+            }
+          }}
+        >
+          <aside
+            aria-labelledby="request-log-drawer-title"
+            aria-modal="true"
+            className="request-log-drawer"
+            role="dialog"
+          >
+            <header className="request-log-drawer-head">
+              <div>
+                <span>安全元数据</span>
+                <h2 id="request-log-drawer-title">请求详情</h2>
+              </div>
+              <button
+                aria-label="关闭请求详情"
+                className="icon-button"
+                onClick={() => setSelectedLogId(null)}
+                type="button"
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="request-log-drawer-body">
+              <section className="request-detail-section">
+                <h3>请求</h3>
+                <div className="request-detail-grid">
+                  <div><span>完整时间</span><strong>{new Date(selectedLog.timestamp).toLocaleString()}</strong></div>
+                  <div><span>请求方法</span><strong>{selectedLog.method}</strong></div>
+                  <div><span>接口</span><strong>{selectedLog.path}</strong></div>
+                  <div><span>模型</span><strong>{selectedLog.model || "-"}</strong></div>
+                  <div>
+                    <span>响应模式</span>
+                    <strong>
+                      {typeof selectedLog.stream === "boolean"
+                        ? selectedLog.stream ? "流式" : "非流式"
+                        : "未记录"}
+                    </strong>
+                  </div>
+                </div>
+              </section>
+
+              <section className="request-detail-section">
+                <h3>请求策略</h3>
+                <div className="request-detail-grid">
+                  <div><span>Effort</span><strong>{selectedLog.reasoning_effort || "未记录"}</strong></div>
+                  <div>
+                    <span>Fast</span>
+                    <strong>
+                      {typeof selectedLog.fast_mode === "boolean"
+                        ? selectedLog.fast_mode ? "开启" : "关闭"
+                        : "未记录"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Service Tier</span>
+                    <strong>
+                      {selectedLog.service_tier ||
+                        (typeof selectedLog.fast_mode === "boolean" ? "标准" : "未记录")}
+                    </strong>
+                  </div>
+                </div>
+              </section>
+
+              <section className="request-detail-section">
+                <h3>执行</h3>
+                <div className="request-detail-grid">
+                  <div><span>状态码</span><strong>{selectedLog.status_code}</strong></div>
+                  <div><span>耗时</span><strong>{selectedLog.duration_ms}ms</strong></div>
+                  <div className="request-detail-wide"><span>Request ID</span><strong>{selectedLog.request_id || "-"}</strong></div>
+                </div>
+              </section>
+
+              <section className="request-detail-section">
+                <h3>Tokens</h3>
+                <div className="request-token-grid">
+                  <div><span>总计</span><strong>{selectedLog.usage?.total ?? "-"}</strong></div>
+                  <div><span>输入</span><strong>{selectedLog.usage?.input ?? "-"}</strong></div>
+                  <div><span>缓存</span><strong>{selectedLog.usage?.cached ?? "-"}</strong></div>
+                  <div><span>输出</span><strong>{selectedLog.usage?.output ?? "-"}</strong></div>
+                  <div><span>推理</span><strong>{selectedLog.usage?.reasoning ?? "-"}</strong></div>
+                </div>
+              </section>
+
+              {selectedLog.error ? (
+                <section className="request-detail-section request-detail-error">
+                  <h3>错误</h3>
+                  <p>{selectedLog.error}</p>
+                </section>
+              ) : null}
+            </div>
+          </aside>
+        </div>
+      ) : null}
 
       {dispatchEditor && oauthAccounts ? (
         <div

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -680,6 +681,7 @@ async def test_routes_apply_real_model_defaults_and_explicit_overrides(tmp_path:
                 "messages": [{"role": "user", "content": "anthropic"}],
             },
         )
+        request_logs = await client.get("/admin/requests")
 
     assert chat.status_code == 200
     assert responses.status_code == 200
@@ -692,6 +694,17 @@ async def test_routes_apply_real_model_defaults_and_explicit_overrides(tmp_path:
     assert fake_client.payloads[2]["model"] == "gpt-5.4"
     assert fake_client.payloads[2]["reasoning"]["effort"] == "high"
     assert anthropic.json()["model"] == "claude-sonnet-5-4"
+    logs_by_path = {item["path"]: item for item in request_logs.json()["items"]}
+    assert logs_by_path["/v1/chat/completions"]["stream"] is False
+    assert logs_by_path["/v1/chat/completions"]["reasoning_effort"] == "high"
+    assert logs_by_path["/v1/chat/completions"]["fast_mode"] is True
+    assert logs_by_path["/v1/chat/completions"]["service_tier"] == "priority"
+    assert logs_by_path["/v1/responses"]["stream"] is False
+    assert logs_by_path["/v1/responses"]["reasoning_effort"] == "low"
+    assert logs_by_path["/v1/responses"]["fast_mode"] is False
+    assert logs_by_path["/v1/responses"]["service_tier"] is None
+    assert logs_by_path["/anthropic/v1/messages"]["reasoning_effort"] == "high"
+    assert logs_by_path["/anthropic/v1/messages"]["fast_mode"] is True
 
 
 @pytest.mark.asyncio
@@ -781,6 +794,75 @@ async def test_admin_oauth_dispatch_updates_mode_and_snapshot(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_refresh_enabled_accounts_runs_enabled_accounts_concurrently(tmp_path: Path) -> None:
+    """验证手动批量刷新只处理启用账号，并且不会串行等待每个账号。"""
+    app = create_app(config=make_test_config(tmp_path))
+    pool = app.state.oauth_account_pool
+    pool._initialized = True
+    account_a = await pool.store.import_credentials(
+        CodexCredentials("access-a", "refresh-a", 4_102_444_800_000, "acct-a"),
+        source="web",
+    )
+    account_b = await pool.store.import_credentials(
+        CodexCredentials("access-b", "refresh-b", 4_102_444_800_000, "acct-b"),
+        source="web",
+    )
+    account_c = await pool.store.import_credentials(
+        CodexCredentials("access-c", "refresh-c", 4_102_444_800_000, "acct-c"),
+        source="web",
+    )
+    await pool.store.update(account_c.key, enabled=False)
+    pool._rebuild_runtimes()
+    started: list[str] = []
+    completed: list[str] = []
+    all_started = asyncio.Event()
+
+    async def fake_refresh(account_key: str) -> dict[str, str]:
+        """等待两个启用账号均开始，用屏障验证批量刷新为并发执行。"""
+        started.append(account_key)
+        if len(started) == 2:
+            all_started.set()
+        await asyncio.wait_for(all_started.wait(), timeout=0.2)
+        completed.append(account_key)
+        return {"account": account_key}
+
+    pool.refresh_account = fake_refresh
+
+    snapshot = await pool.refresh_enabled_accounts()
+
+    assert set(started) == {account_a.key, account_b.key}
+    assert set(completed) == {account_a.key, account_b.key}
+    assert account_c.key not in started
+    assert {item["key"] for item in snapshot["accounts"]} == {account_a.key, account_b.key, account_c.key}
+
+
+@pytest.mark.asyncio
+async def test_admin_oauth_accounts_refresh_returns_latest_snapshot(tmp_path: Path) -> None:
+    """验证管理接口调用批量刷新并直接返回最新账号快照。"""
+    app = create_app(config=make_test_config(tmp_path))
+    pool = app.state.oauth_account_pool
+    pool._initialized = True
+    called = 0
+
+    async def fake_refresh_enabled_accounts() -> dict[str, Any]:
+        """返回带标记的快照，便于确认路由没有读取旧缓存。"""
+        nonlocal called
+        called += 1
+        snapshot = pool.snapshot()
+        snapshot["waitingQueueSize"] = 7
+        return snapshot
+
+    pool.refresh_enabled_accounts = fake_refresh_enabled_accounts
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/admin/oauth/accounts/refresh")
+
+    assert response.status_code == 200
+    assert called == 1
+    assert response.json()["waitingQueueSize"] == 7
+
+
+@pytest.mark.asyncio
 async def test_responses_route_streams_sse_and_logs_final_usage(tmp_path: Path) -> None:
     """验证 /v1/responses 流式响应会转发 SSE 并记录最终 usage。"""
     # fake client 的 stream_response 会返回两个 delta 和一个 completed 事件。
@@ -862,6 +944,8 @@ async def test_chat_stream_returns_sse_error_when_codex_rejects_request(tmp_path
                 "model": "gpt-5.5",
                 "messages": [{"role": "user", "content": "hello"}],
                 "stream": True,
+                "reasoning_effort": "low",
+                "service_tier": "fast",
             },
         )
         requests = await client.get("/admin/requests")
@@ -878,6 +962,10 @@ async def test_chat_stream_returns_sse_error_when_codex_rejects_request(tmp_path
     assert item["path"] == "/v1/chat/completions"
     assert item["status_code"] == 400
     assert "newer version of Codex" in item["error"]
+    assert item["stream"] is True
+    assert item["reasoning_effort"] == "low"
+    assert item["fast_mode"] is True
+    assert item["service_tier"] == "priority"
 
 
 @pytest.mark.asyncio
@@ -906,3 +994,7 @@ async def test_chat_non_stream_returns_json_error_when_codex_response_is_unexpec
     assert item["path"] == "/v1/chat/completions"
     assert item["status_code"] == 502
     assert "upstream unavailable" in item["error"]
+    assert item["stream"] is False
+    assert item["reasoning_effort"] == "medium"
+    assert item["fast_mode"] is False
+    assert item["service_tier"] is None

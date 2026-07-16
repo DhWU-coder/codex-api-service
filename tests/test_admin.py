@@ -15,6 +15,7 @@ from codex_api_service.config import (
     ServerConfig,
     UsageConfig,
 )
+from codex_api_service.request_log import RequestLogStore
 
 
 class AdminFakeCodexClient:
@@ -349,6 +350,60 @@ async def test_admin_requests_lists_recent_api_calls(tmp_path: Path) -> None:
     serialized = json.dumps(body, ensure_ascii=False)
     assert "hello" not in serialized
     assert "Authorization" not in serialized
+
+
+def test_request_log_persists_safe_policy_metadata(tmp_path: Path) -> None:
+    """验证安全策略元数据会写入 JSONL，并能在重新加载后恢复。"""
+    path = tmp_path / "logs" / "requests.jsonl"
+    store = RequestLogStore(path=path)
+
+    store.record(
+        method="POST",
+        path="/v1/responses",
+        model="gpt-5.5",
+        status_code=200,
+        duration_ms=321,
+        stream=True,
+        reasoning_effort="high",
+        fast_mode=True,
+        service_tier="priority",
+    )
+
+    item = RequestLogStore(path=path).list_recent()[0]
+    assert item["stream"] is True
+    assert item["reasoning_effort"] == "high"
+    assert item["fast_mode"] is True
+    assert item["service_tier"] == "priority"
+
+
+def test_request_log_loads_legacy_entry_without_policy_metadata(tmp_path: Path) -> None:
+    """验证旧日志缺少策略字段时仍可读取，并用空值明确表示未记录。"""
+    path = tmp_path / "logs" / "requests.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "id": "req_legacy",
+                "timestamp": "2026-07-16T10:00:00.000Z",
+                "method": "POST",
+                "path": "/v1/chat/completions",
+                "model": "gpt-5.5",
+                "status_code": 200,
+                "duration_ms": 100,
+                "usage": None,
+                "request_id": "resp_legacy",
+                "error": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    item = RequestLogStore(path=path).list_recent()[0]
+    assert item["stream"] is None
+    assert item["reasoning_effort"] is None
+    assert item["fast_mode"] is None
+    assert item["service_tier"] is None
 
 
 @pytest.mark.asyncio

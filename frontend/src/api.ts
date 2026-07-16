@@ -144,6 +144,18 @@ export async function fetchOAuthAccounts(apiKey: string): Promise<OAuthAccountsS
   return (await response.json()) as OAuthAccountsSnapshot;
 }
 
+// 强制刷新全部启用账号的额度，并返回可直接替换页面状态的完整快照。
+export async function refreshOAuthAccounts(apiKey: string): Promise<OAuthAccountsSnapshot> {
+  const response = await fetch("/admin/oauth/accounts/refresh", {
+    method: "POST",
+    headers: buildAuthHeaders(apiKey)
+  });
+  if (!response.ok) {
+    throw new Error(`额度刷新失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as OAuthAccountsSnapshot;
+}
+
 // 把当前 Codex CLI/App 登录同步到真实账号对应的项目目录。
 export async function syncOAuthAccounts(apiKey: string): Promise<OAuthAccountsSnapshot> {
   const response = await fetch("/admin/oauth/accounts/sync", {

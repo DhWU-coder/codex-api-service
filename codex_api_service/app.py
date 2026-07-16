@@ -163,9 +163,18 @@ def create_app(
         body = await request.json()
         model = str(body.get("model") or app_config.codex.default_model)
         payload = _chat_body_to_codex_payload(body, app_config, model)
+        request_metadata = _request_policy_log_fields(body, payload)
         if bool(body.get("stream")):
             return StreamingResponse(
-                _stream_chat_completion(client, payload, model, usage_logger, request_log, started),
+                _stream_chat_completion(
+                    client,
+                    payload,
+                    model,
+                    usage_logger,
+                    request_log,
+                    started,
+                    request_metadata,
+                ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -180,6 +189,7 @@ def create_app(
                 model=model,
                 request_log=request_log,
                 started=started,
+                request_metadata=request_metadata,
             )
         usage_logger.log(model=model, usage=codex_response.get("usage"), request_id=_request_id(codex_response))
         request_log.record(
@@ -190,6 +200,7 @@ def create_app(
             duration_ms=_duration_ms(started),
             usage=codex_response.get("usage"),
             request_id=_request_id(codex_response),
+            **request_metadata,
         )
         return JSONResponse(build_chat_completion(codex_response, model=model))
 
@@ -201,9 +212,10 @@ def create_app(
         body = await request.json()
         model = str(body.get("model") or app_config.codex.default_model)
         payload = _responses_body_to_codex_payload(body, app_config, model)
+        request_metadata = _request_policy_log_fields(body, payload)
         if bool(body.get("stream")):
             return StreamingResponse(
-                _stream_response(client, payload, model, usage_logger, request_log, started),
+                _stream_response(client, payload, model, usage_logger, request_log, started, request_metadata),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -218,6 +230,7 @@ def create_app(
                 model=model,
                 request_log=request_log,
                 started=started,
+                request_metadata=request_metadata,
             )
         usage_logger.log(model=model, usage=codex_response.get("usage"), request_id=_request_id(codex_response))
         request_log.record(
@@ -228,6 +241,7 @@ def create_app(
             duration_ms=_duration_ms(started),
             usage=codex_response.get("usage"),
             request_id=_request_id(codex_response),
+            **request_metadata,
         )
         return JSONResponse(build_response_object(codex_response, model=model))
 
@@ -242,9 +256,19 @@ def create_app(
         snapshot = await catalog.snapshot()
         requested_model, codex_model = _anthropic_requested_and_codex_model(body.get("model"), snapshot, app_config)
         payload = _anthropic_body_to_codex_payload(body, app_config, codex_model)
+        request_metadata = _request_policy_log_fields(body, payload)
         if bool(body.get("stream")):
             return StreamingResponse(
-                _stream_anthropic_message(client, payload, requested_model, path, usage_logger, request_log, started),
+                _stream_anthropic_message(
+                    client,
+                    payload,
+                    requested_model,
+                    path,
+                    usage_logger,
+                    request_log,
+                    started,
+                    request_metadata,
+                ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -259,6 +283,7 @@ def create_app(
                 model=requested_model,
                 request_log=request_log,
                 started=started,
+                request_metadata=request_metadata,
             )
         usage_logger.log(model=codex_model, usage=codex_response.get("usage"), request_id=_request_id(codex_response))
         request_log.record(
@@ -269,6 +294,7 @@ def create_app(
             duration_ms=_duration_ms(started),
             usage=codex_response.get("usage"),
             request_id=_request_id(codex_response),
+            **request_metadata,
         )
         return JSONResponse(build_anthropic_message(codex_response, model=requested_model))
 
@@ -398,6 +424,15 @@ def create_app(
         await account_pool.ensure_initialized()
         record = await account_pool.sync_global()
         return {"synced": record is not None, **account_pool.snapshot()}
+
+    @app.post("/admin/oauth/accounts/refresh")
+    async def admin_oauth_accounts_refresh(request: Request) -> dict[str, Any]:
+        """立即并发刷新全部启用账号的额度。"""
+        _require_local_auth(request, app_config)
+        if account_pool is None:
+            raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
+        await account_pool.ensure_initialized()
+        return await account_pool.refresh_enabled_accounts()
 
     @app.put("/admin/oauth/dispatch")
     async def admin_oauth_dispatch_update(request: Request) -> dict[str, Any]:
@@ -670,6 +705,19 @@ def _base_codex_payload(config: AppConfig, model: str, body: dict[str, Any]) -> 
     return payload
 
 
+def _request_policy_log_fields(body: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """从最终上游 payload 提取允许持久化的安全策略元数据。"""
+    reasoning = payload.get("reasoning")
+    effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+    service_tier = payload.get("service_tier")
+    return {
+        "stream": bool(body.get("stream")),
+        "reasoning_effort": effort if isinstance(effort, str) else None,
+        "fast_mode": service_tier == "priority",
+        "service_tier": service_tier if isinstance(service_tier, str) else None,
+    }
+
+
 async def _stream_chat_completion(
     client: Any,
     payload: dict[str, Any],
@@ -677,6 +725,7 @@ async def _stream_chat_completion(
     usage_logger: UsageLogger,
     request_log: RequestLogStore,
     started: float,
+    request_metadata: dict[str, Any],
 ) -> AsyncIterator[str]:
     """把 Codex SSE 转成 Chat Completions SSE。"""
     response_id = "resp_stream"
@@ -707,6 +756,7 @@ async def _stream_chat_completion(
             status_code=status_code,
             duration_ms=_duration_ms(started),
             error=f"{error_code}: {message}" if error_code else message,
+            **request_metadata,
         )
         yield _stream_error_sse(message=message, status_code=status_code, error_code=error_code)
         yield "data: [DONE]\n\n"
@@ -725,6 +775,7 @@ async def _stream_chat_completion(
             duration_ms=_duration_ms(started),
             usage=completed_response.get("usage"),
             request_id=_request_id(completed_response),
+            **request_metadata,
         )
     yield "data: [DONE]\n\n"
 
@@ -736,6 +787,7 @@ async def _stream_response(
     usage_logger: UsageLogger,
     request_log: RequestLogStore,
     started: float,
+    request_metadata: dict[str, Any],
 ) -> AsyncIterator[str]:
     """把 Codex SSE 转成 Responses API SSE。"""
     completed_response: dict[str, Any] | None = None
@@ -757,6 +809,7 @@ async def _stream_response(
             status_code=status_code,
             duration_ms=_duration_ms(started),
             error=f"{error_code}: {message}" if error_code else message,
+            **request_metadata,
         )
         yield _stream_error_sse(message=message, status_code=status_code, error_code=error_code)
         yield "data: [DONE]\n\n"
@@ -775,6 +828,7 @@ async def _stream_response(
             duration_ms=_duration_ms(started),
             usage=completed_response.get("usage"),
             request_id=_request_id(completed_response),
+            **request_metadata,
         )
     yield "data: [DONE]\n\n"
 
@@ -787,6 +841,7 @@ async def _stream_anthropic_message(
     usage_logger: UsageLogger,
     request_log: RequestLogStore,
     started: float,
+    request_metadata: dict[str, Any],
 ) -> AsyncIterator[str]:
     """把 Codex SSE 转成 Anthropic Messages SSE。"""
     message_id = "msg_resp_stream"
@@ -831,6 +886,7 @@ async def _stream_anthropic_message(
             status_code=status_code,
             duration_ms=_duration_ms(started),
             error=message,
+            **request_metadata,
         )
         if content_open:
             yield anthropic_content_block_stop_sse(index=content_index)
@@ -855,6 +911,7 @@ async def _stream_anthropic_message(
             duration_ms=_duration_ms(started),
             usage=completed_response.get("usage"),
             request_id=_request_id(completed_response),
+            **request_metadata,
         )
         yield anthropic_message_delta_sse(
             usage=completed_response.get("usage"),
@@ -879,6 +936,7 @@ def _raise_non_stream_error(
     model: str,
     request_log: RequestLogStore,
     started: float,
+    request_metadata: dict[str, Any],
 ) -> None:
     """记录非流式请求错误，并转换成 OpenAI 客户端可读的 JSON HTTP 错误。"""
     # 非流式响应尚未发送，可以直接使用正确 HTTP 状态码和 JSON detail。
@@ -892,6 +950,7 @@ def _raise_non_stream_error(
         status_code=status_code,
         duration_ms=_duration_ms(started),
         error=f"{error_code}: {message}" if error_code else message,
+        **request_metadata,
     )
     raise HTTPException(
         status_code=status_code,

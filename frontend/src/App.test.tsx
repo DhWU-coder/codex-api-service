@@ -148,7 +148,11 @@ const requestLogItems = [
     duration_ms: 2000,
     usage: { total: 40, input: 20, cached: 5, output: 15, reasoning: 4 },
     request_id: "resp_2",
-    error: null
+    error: null,
+    stream: true,
+    reasoning_effort: "high",
+    fast_mode: true,
+    service_tier: "priority"
   },
   {
     id: "req_dashboard_1",
@@ -160,7 +164,11 @@ const requestLogItems = [
     duration_ms: 1000,
     usage: { total: 20, input: 12, cached: 2, output: 8, reasoning: 1 },
     request_id: "resp_1",
-    error: null
+    error: null,
+    stream: false,
+    reasoning_effort: "medium",
+    fast_mode: false,
+    service_tier: null
   }
 ];
 
@@ -173,6 +181,7 @@ describe("App theme mode", () => {
   let requestLogsResponse = requestLogItems;
   let oauthLoginStartResponse: Record<string, unknown> | null = null;
   let oauthAccountsResponse = oauthAccountsStatus;
+  let oauthAccountsRefreshResponse = oauthAccountsStatus;
 
   beforeEach(() => {
     capturedRequests = [];
@@ -183,6 +192,7 @@ describe("App theme mode", () => {
     requestLogsResponse = requestLogItems;
     oauthLoginStartResponse = null;
     oauthAccountsResponse = oauthAccountsStatus;
+    oauthAccountsRefreshResponse = oauthAccountsStatus;
 
     // 用内存版 localStorage 规避 jsdom 在当前环境里的存储实现差异。
     const memoryStorage = new Map<string, string>();
@@ -256,6 +266,9 @@ describe("App theme mode", () => {
         }
         if (url === "/admin/oauth/accounts") {
           return new Response(JSON.stringify(oauthAccountsResponse), { status: 200 });
+        }
+        if (url === "/admin/oauth/accounts/refresh" && method === "POST") {
+          return new Response(JSON.stringify(oauthAccountsRefreshResponse), { status: 200 });
         }
         if (url === "/admin/oauth/accounts/account-a" && method === "PATCH") {
           return new Response(JSON.stringify(oauthAccountsResponse), { status: 200 });
@@ -500,6 +513,56 @@ describe("App theme mode", () => {
     });
   });
 
+  it("refreshes the visible multi-account quota snapshot", async () => {
+    // 刷新按钮应替换账号卡片使用的 oauthAccounts，而不是只更新隐藏的单账号兼容数据。
+    oauthAccountsRefreshResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({
+        ...account,
+        usage: {
+          ...codexUsageStatus,
+          rateLimit: {
+            ...codexUsageStatus.rateLimit,
+            windows: codexUsageStatus.rateLimit.windows.map((window, index) =>
+              index === 0 ? { ...window, usedPercent: 58, remainingPercent: 42 } : window
+            )
+          }
+        }
+      }))
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "额度状态" }));
+    expect(await screen.findByText("67%")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+    expect(await screen.findByText("42%")).toBeTruthy();
+    expect(
+      capturedRequests.some(
+        (request) => request.url === "/admin/oauth/accounts/refresh" && request.method === "POST"
+      )
+    ).toBe(true);
+  });
+
+  it("shows an account error when a quota refresh partially fails", async () => {
+    // 后端按部分成功返回快照时，失败账号应保留旧额度并明确展示错误。
+    oauthAccountsRefreshResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({
+        ...account,
+        lastError: "额度读取失败"
+      }))
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "额度状态" }));
+    await screen.findByText("67%");
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+    expect(await screen.findByText("额度读取失败")).toBeTruthy();
+    expect(await screen.findByText("67%")).toBeTruthy();
+  });
+
   it("shows scaled decimal weight and the five-hour reset time", async () => {
     // 账号卡片应该使用易读权重，并直接展示主额度重置时间。
     render(<App />);
@@ -717,8 +780,8 @@ describe("App theme mode", () => {
     expect([...modelSelect.options].map((option) => option.value)).toEqual(["gpt-5.5"]);
   });
 
-  it("filters and expands request logs", async () => {
-    // 日志页应支持按文本过滤，并能展开查看 request id 和完整错误字段。
+  it("filters request logs and opens a safe metadata drawer", async () => {
+    // 日志页应支持按文本过滤，点击后通过右侧抽屉展示安全元数据。
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "请求日志" }));
     await waitFor(() => {
@@ -730,8 +793,34 @@ describe("App theme mode", () => {
     expect(screen.queryByText("/v1/chat/completions")).toBeNull();
 
     fireEvent.click(screen.getByText("/v1/responses"));
-    expect(await screen.findByText("request id")).toBeTruthy();
+    const dialog = await screen.findByRole("dialog", { name: "请求详情" });
+    expect(dialog).toBeTruthy();
+    expect(await screen.findByText("Request ID")).toBeTruthy();
     expect(await screen.findByText("resp_1")).toBeTruthy();
+    expect(await screen.findByText("非流式")).toBeTruthy();
+    expect(await screen.findByText("medium")).toBeTruthy();
+    expect(await screen.findByText("关闭")).toBeTruthy();
+    expect(await screen.findByText("标准")).toBeTruthy();
+    expect(screen.queryByText("request id")).toBeNull();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "请求详情" })).toBeNull());
+  });
+
+  it("closes the request detail drawer from the close button and backdrop", async () => {
+    // 关闭按钮和遮罩都应清除当前选择，避免抽屉残留在其他日志筛选结果上。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "请求日志" }));
+    fireEvent.click(await screen.findByText("/v1/responses"));
+    await screen.findByRole("dialog", { name: "请求详情" });
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭请求详情" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "请求详情" })).toBeNull());
+
+    fireEvent.click(screen.getByText("/v1/responses"));
+    await screen.findByRole("dialog", { name: "请求详情" });
+    fireEvent.mouseDown(screen.getByTestId("request-log-drawer-backdrop"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "请求详情" })).toBeNull());
   });
 
   it("selects the request log count and virtualizes large results", async () => {

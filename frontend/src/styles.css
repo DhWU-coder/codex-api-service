@@ -1345,11 +1345,10 @@ button:disabled {
   background: color-mix(in srgb, var(--primary-bg) 8%, transparent);
 }
 
-/* 展开详情占用算法约定的 88px，并允许长错误自动换行。 */
-.virtual-log-item .log-detail {
-  height: 88px;
-  padding: 10px;
-  background: color-mix(in srgb, var(--panel-bg) 72%, var(--primary-bg) 8%);
+/* 当前详情对应行保持轻量选中态，不改变固定行高。 */
+.virtual-log-item.selected .virtual-log-main {
+  background: color-mix(in srgb, var(--primary-bg) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--primary-bg);
 }
 
 /* 日志表格用于高密度扫描请求元数据。 */
@@ -1406,34 +1405,148 @@ th {
   white-space: nowrap;
 }
 
-/* 日志行可点击展开详情。 */
-.log-row {
-  cursor: pointer;
+/* 日志详情遮罩固定在表格外层，避免参与虚拟列表布局。 */
+.request-log-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(2, 7, 16, 0.58);
+  backdrop-filter: blur(3px);
 }
 
-/* 日志行悬停时轻微高亮，提示可交互。 */
-.log-row:hover {
-  background: color-mix(in srgb, var(--primary-bg) 8%, transparent);
-}
-
-/* 展开详情行使用弱背景，避免像另一条请求。 */
-.log-detail-row td {
-  background: color-mix(in srgb, var(--panel-bg) 72%, var(--primary-bg) 8%);
-}
-
-/* 请求详情只展示排障元数据，不包含 prompt 或响应正文。 */
-.log-detail {
+/* 右侧抽屉只展示允许持久化的安全元数据。 */
+.request-log-drawer {
   display: grid;
-  grid-template-columns: 100px minmax(0, 1fr);
-  gap: 8px 12px;
-  color: var(--page-muted);
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(560px, calc(100vw - 32px));
+  height: 100%;
+  overflow: hidden;
+  border-left: 1px solid var(--panel-border);
+  color: var(--page-text);
+  background: var(--panel-bg);
+  box-shadow: -20px 0 70px rgba(0, 0, 0, 0.36);
+  animation: request-log-drawer-in 180ms ease-out;
 }
 
-/* 详情值允许换行，保留完整错误摘要。 */
-.log-detail strong {
+/* 抽屉标题栏固定展示请求状态和关闭入口。 */
+.request-log-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px 22px;
+  border-bottom: 1px solid var(--panel-divider);
+}
+
+.request-log-drawer-head span {
+  color: var(--page-muted);
+  font-size: 12px;
+}
+
+.request-log-drawer-head h2 {
+  margin: 4px 0 0;
+  color: var(--page-title);
+  font-size: 22px;
+}
+
+/* 关闭按钮跟随标题栏布局，不能继承聊天消息的绝对定位。 */
+.request-log-drawer-head .icon-button {
+  position: static;
+  flex: 0 0 auto;
+}
+
+.request-log-drawer-body {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 18px 22px 28px;
+  overflow-y: auto;
+}
+
+.request-detail-section {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: var(--message-bg);
+}
+
+.request-detail-section h3 {
+  margin: 0;
+  color: var(--page-title);
+  font-size: 15px;
+}
+
+.request-detail-grid,
+.request-token-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.request-token-grid {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.request-detail-grid > div,
+.request-token-grid > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.request-detail-grid span,
+.request-token-grid span {
+  color: var(--page-muted);
+  font-size: 12px;
+}
+
+.request-detail-grid strong,
+.request-token-grid strong {
   min-width: 0;
   color: var(--page-title);
+  font-size: 14px;
   overflow-wrap: anywhere;
+}
+
+.request-detail-wide {
+  grid-column: 1 / -1;
+}
+
+.request-detail-error {
+  border-color: color-mix(in srgb, var(--danger-text) 36%, var(--panel-border));
+  background: color-mix(in srgb, var(--danger-bg) 55%, var(--message-bg));
+}
+
+.request-detail-error p {
+  margin: 0;
+  color: var(--danger-text);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+@keyframes request-log-drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@media (max-width: 640px) {
+  .request-log-drawer {
+    width: 100%;
+  }
+
+  .request-detail-grid,
+  .request-token-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* 配置表单使用响应式网格。 */

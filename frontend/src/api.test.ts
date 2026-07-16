@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { buildAuthHeaders, fetchAdminModels, fetchCodexUsage, fetchDashboardSummary, parseChatStreamLine } from "./api";
+import {
+  buildAuthHeaders,
+  fetchAdminModels,
+  fetchCodexUsage,
+  fetchDashboardSummary,
+  parseChatStreamLine,
+  refreshOAuthAccounts
+} from "./api";
 
 describe("frontend api helpers", () => {
   it("builds bearer headers only when api key is present", () => {
@@ -100,6 +107,34 @@ describe("frontend api helpers", () => {
     await fetchCodexUsage("local-secret");
 
     expect(requests).toEqual(["/admin/codex/usage"]);
+    vi.unstubAllGlobals();
+  });
+
+  it("refreshes all enabled OAuth account quotas through the batch endpoint", async () => {
+    // 手动刷新必须由后端统一调度，浏览器只发送一次带鉴权的 POST。
+    const requests: Array<{ url: string; method: string; authorization: string | null }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        requests.push({
+          url: String(input),
+          method: init?.method || "GET",
+          authorization: headers.get("Authorization")
+        });
+        return new Response(JSON.stringify({ accounts: [], dispatchMode: "multi" }), { status: 200 });
+      })
+    );
+
+    await refreshOAuthAccounts("local-secret");
+
+    expect(requests).toEqual([
+      {
+        url: "/admin/oauth/accounts/refresh",
+        method: "POST",
+        authorization: "Bearer local-secret"
+      }
+    ]);
     vi.unstubAllGlobals();
   });
 });

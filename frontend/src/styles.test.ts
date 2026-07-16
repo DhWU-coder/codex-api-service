@@ -22,4 +22,12 @@ describe("console visual theme", () => {
     expect(styles).toContain(':root[data-theme="dark"]');
     expect(styles).toContain("--sidebar-bg: #080d16");
   });
+
+  it("defines a right-side request detail drawer", () => {
+    // 请求详情必须脱离虚拟表格定位，并通过右侧进入动画表达层级。
+    expect(styles).toContain(".request-log-drawer-backdrop");
+    expect(styles).toContain(".request-log-drawer");
+    expect(styles).toContain("@keyframes request-log-drawer-in");
+    expect(styles).not.toContain(".virtual-log-item .log-detail");
+  });
 });

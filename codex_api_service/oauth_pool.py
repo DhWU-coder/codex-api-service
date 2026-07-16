@@ -164,6 +164,12 @@ class OAuthAccountPool:
         self._update_scheduler()
         return usage
 
+    async def refresh_enabled_accounts(self) -> dict[str, Any]:
+        """并发刷新全部启用账号，并返回最新脱敏快照。"""
+        enabled_keys = [key for key, runtime in self.runtimes.items() if runtime.record.enabled]
+        await asyncio.gather(*(self.refresh_account(key) for key in enabled_keys), return_exceptions=True)
+        return self.snapshot()
+
     def snapshot(self) -> dict[str, Any]:
         """返回不包含 token 的多账号管理快照。"""
         global_active, account_active, waiting_count = self.scheduler.active_snapshot()

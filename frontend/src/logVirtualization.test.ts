@@ -25,15 +25,16 @@ describe("calculateVirtualLogWindow", () => {
     expect(result.items.at(-1)?.index).toBe(999);
   });
 
-  it("展开行会增加总高度并推后后续行", () => {
+  it("选择日志不会改变固定行高和后续行位置", () => {
+    // 即使旧调用方残留展开参数，详情抽屉也不应影响虚拟列表几何尺寸。
     const result = calculateVirtualLogWindow({
       itemCount: 1000,
       scrollTop: 480,
       expandedIndex: 10
-    });
+    } as never);
 
-    expect(result.totalHeight).toBe(48_088);
-    expect(result.items.find((item) => item.index === 10)).toEqual({ index: 10, top: 480, height: 136 });
-    expect(result.items.find((item) => item.index === 11)?.top).toBe(616);
+    expect(result.totalHeight).toBe(48_000);
+    expect(result.items.find((item) => item.index === 10)).toEqual({ index: 10, top: 480, height: 48 });
+    expect(result.items.find((item) => item.index === 11)?.top).toBe(528);
   });
 });
