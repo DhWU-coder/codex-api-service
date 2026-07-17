@@ -33,6 +33,7 @@ class RequestLogEntry:
     service_tier: str | None = None
     account_key: str | None = None
     account_alias: str | None = None
+    client_ip: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换成 JSON 响应可序列化的 dict。"""
@@ -53,6 +54,7 @@ class RequestLogEntry:
             "service_tier": self.service_tier,
             "account_key": self.account_key,
             "account_alias": self.account_alias,
+            "client_ip": self.client_ip,
         }
 
 
@@ -86,6 +88,7 @@ class RequestLogStore:
         service_tier: str | None = None,
         account_key: str | None = None,
         account_alias: str | None = None,
+        client_ip: str | None = None,
     ) -> RequestLogEntry:
         """追加一条请求元数据日志。"""
         # usage 统一映射到 codex-usage 的字段，方便前端直接显示。
@@ -107,6 +110,7 @@ class RequestLogStore:
             service_tier=service_tier,
             account_key=account_key,
             account_alias=account_alias,
+            client_ip=client_ip,
         )
         self._items.appendleft(entry)
         self._append_persisted_entry(entry)
@@ -218,6 +222,7 @@ def _entry_from_dict(item: dict[str, Any]) -> RequestLogEntry | None:
             service_tier=item["service_tier"] if isinstance(item.get("service_tier"), str) else None,
             account_key=item["account_key"] if isinstance(item.get("account_key"), str) else None,
             account_alias=item["account_alias"] if isinstance(item.get("account_alias"), str) else None,
+            client_ip=item["client_ip"] if isinstance(item.get("client_ip"), str) else None,
         )
     except (KeyError, TypeError, ValueError):
         return None

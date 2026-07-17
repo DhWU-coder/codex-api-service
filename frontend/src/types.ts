@@ -176,4 +176,5 @@ export type RequestLogItem = {
   service_tier?: string | null;
   account_key?: string | null;
   account_alias?: string | null;
+  client_ip?: string | null;
 };

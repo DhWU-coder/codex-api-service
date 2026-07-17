@@ -299,6 +299,83 @@ async def test_models_route_returns_openai_list_shape(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_all_api_routes_log_direct_client_ip(tmp_path: Path) -> None:
+    """验证模型发现和三类推理接口都记录 TCP 直连客户端 IP。"""
+    app = create_app(
+        config=make_test_config(tmp_path),
+        codex_client=FakeCodexClient(),
+        model_catalog=FakeModelCatalog(model_snapshot("gpt-5.5")),
+    )
+    transport = ASGITransport(app=app, client=("203.0.113.8", 54321))
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.get("/v1/models")
+        await client.get("/anthropic/v1/models")
+        await client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-5.5", "messages": [{"role": "user", "content": "hello"}]},
+        )
+        await client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.5", "input": "hello"},
+        )
+        await client.post(
+            "/anthropic/v1/messages",
+            json={
+                "model": "gpt-5.5",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        request_logs = await client.get("/admin/requests")
+
+    logs_by_path = {item["path"]: item for item in request_logs.json()["items"]}
+    expected_paths = {
+        "/v1/models",
+        "/anthropic/v1/models",
+        "/v1/chat/completions",
+        "/v1/responses",
+        "/anthropic/v1/messages",
+    }
+    assert expected_paths.issubset(logs_by_path)
+    assert {logs_by_path[path]["client_ip"] for path in expected_paths} == {"203.0.113.8"}
+
+
+@pytest.mark.asyncio
+async def test_stream_request_log_records_direct_client_ip(tmp_path: Path) -> None:
+    """验证流式请求完成后仍记录同一连接的 IPv6 地址。"""
+    app = create_app(config=make_test_config(tmp_path), codex_client=FakeCodexClient())
+    transport = ASGITransport(app=app, client=("2001:db8::8", 54321))
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.5", "input": "hello", "stream": True},
+        )
+        request_logs = await client.get("/admin/requests")
+
+    assert response.status_code == 200
+    assert request_logs.json()["items"][0]["client_ip"] == "2001:db8::8"
+
+
+@pytest.mark.asyncio
+async def test_failed_request_log_records_direct_client_ip(tmp_path: Path) -> None:
+    """验证上游失败日志也保留调用方直连 IP。"""
+    app = create_app(config=make_test_config(tmp_path), codex_client=FailingCreateCodexClient())
+    transport = ASGITransport(app=app, client=("198.51.100.24", 54321))
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-5.5", "messages": [{"role": "user", "content": "hello"}]},
+        )
+        request_logs = await client.get("/admin/requests")
+
+    assert response.status_code == 502
+    assert request_logs.json()["items"][0]["client_ip"] == "198.51.100.24"
+
+
+@pytest.mark.asyncio
 async def test_admin_models_route_returns_catalog_and_honors_refresh(tmp_path: Path) -> None:
     """验证 /admin/models 返回动态目录，并透传 refresh=true。"""
     catalog = FakeModelCatalog(model_snapshot("gpt-5.6-sol", default_model="gpt-5.6-sol"))

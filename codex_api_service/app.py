@@ -139,6 +139,7 @@ def create_app(
             model=None,
             status_code=200,
             duration_ms=_duration_ms(started),
+            client_ip=_request_client_ip(request),
         )
         return response_body
 
@@ -156,6 +157,7 @@ def create_app(
             model=None,
             status_code=200,
             duration_ms=_duration_ms(started),
+            client_ip=_request_client_ip(request),
         )
         return response_body
 
@@ -167,7 +169,10 @@ def create_app(
         body = await request.json()
         model = str(body.get("model") or app_config.codex.default_model)
         payload = _chat_body_to_codex_payload(body, app_config, model)
-        request_metadata = _request_policy_log_fields(body, payload)
+        request_metadata = {
+            **_request_policy_log_fields(body, payload),
+            "client_ip": _request_client_ip(request),
+        }
         if bool(body.get("stream")):
             return StreamingResponse(
                 _stream_chat_completion(
@@ -218,7 +223,10 @@ def create_app(
         body = await request.json()
         model = str(body.get("model") or app_config.codex.default_model)
         payload = _responses_body_to_codex_payload(body, app_config, model)
-        request_metadata = _request_policy_log_fields(body, payload)
+        request_metadata = {
+            **_request_policy_log_fields(body, payload),
+            "client_ip": _request_client_ip(request),
+        }
         if bool(body.get("stream")):
             return StreamingResponse(
                 _stream_response(client, payload, model, usage_logger, request_log, started, request_metadata),
@@ -264,7 +272,10 @@ def create_app(
         snapshot = await catalog.snapshot()
         requested_model, codex_model = _anthropic_requested_and_codex_model(body.get("model"), snapshot, app_config)
         payload = _anthropic_body_to_codex_payload(body, app_config, codex_model)
-        request_metadata = _request_policy_log_fields(body, payload)
+        request_metadata = {
+            **_request_policy_log_fields(body, payload),
+            "client_ip": _request_client_ip(request),
+        }
         if bool(body.get("stream")):
             return StreamingResponse(
                 _stream_anthropic_message(
@@ -734,6 +745,14 @@ def _request_policy_log_fields(body: dict[str, Any], payload: dict[str, Any]) ->
         "fast_mode": service_tier == "priority",
         "service_tier": service_tier if isinstance(service_tier, str) else None,
     }
+
+
+def _request_client_ip(request: Request) -> str | None:
+    """读取 TCP 直连客户端 IP，不信任可由调用方伪造的转发请求头。"""
+    if request.client is None:
+        return None
+    host = request.client.host.strip()
+    return host or None
 
 
 async def _stream_chat_completion(
@@ -1240,7 +1259,13 @@ def main() -> None:
         _print_config(config)
         return
     _print_startup_banner(config)
-    uvicorn.run(create_app(config=config), host=config.server.host, port=config.server.port)
+    # 当前服务直接暴露端口，关闭代理头解析才能保证 request.client 是真实 TCP 来源。
+    uvicorn.run(
+        create_app(config=config),
+        host=config.server.host,
+        port=config.server.port,
+        proxy_headers=False,
+    )
 
 
 if __name__ == "__main__":

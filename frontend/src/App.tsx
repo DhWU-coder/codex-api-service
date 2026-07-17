@@ -84,6 +84,17 @@ type ThemeMode = "light" | "dark";
 // 主题选择保存在本地浏览器，刷新后保持用户偏好。
 const THEME_STORAGE_KEY = "codex-console-theme";
 
+// 回环地址保留原始值，同时明确告诉用户该请求来自本机。
+function formatClientIp(clientIp: string | null | undefined): string {
+  const normalized = clientIp?.trim();
+  if (!normalized) {
+    return "未记录";
+  }
+  const lower = normalized.toLowerCase();
+  const isLoopback = lower === "::1" || lower.startsWith("127.") || lower.startsWith("::ffff:127.");
+  return isLoopback ? `本机（${normalized}）` : normalized;
+}
+
 // 没有目录元数据时保留旧四档，保证配置兜底仍可编辑。
 const DEFAULT_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"];
 
@@ -2280,6 +2291,7 @@ export function App() {
                   <div><span>请求方法</span><strong>{selectedLog.method}</strong></div>
                   <div><span>接口</span><strong>{selectedLog.path}</strong></div>
                   <div><span>模型</span><strong>{selectedLog.model || "-"}</strong></div>
+                  <div><span>客户端 IP</span><strong>{formatClientIp(selectedLog.client_ip)}</strong></div>
                   <div>
                     <span>响应模式</span>
                     <strong>

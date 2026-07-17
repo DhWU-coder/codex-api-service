@@ -170,7 +170,8 @@ const requestLogItems = [
     fast_mode: false,
     service_tier: null,
     account_key: "account-a",
-    account_alias: "owner@example.com"
+    account_alias: "owner@example.com",
+    client_ip: "127.0.0.1"
   }
 ];
 
@@ -804,6 +805,7 @@ describe("App theme mode", () => {
     expect(await screen.findByText("关闭")).toBeTruthy();
     expect(await screen.findByText("标准")).toBeTruthy();
     expect(await screen.findByText("owner@example.com")).toBeTruthy();
+    expect(await screen.findByText("本机（127.0.0.1）")).toBeTruthy();
     expect(screen.queryByText("request id")).toBeNull();
 
     fireEvent.keyDown(window, { key: "Escape" });

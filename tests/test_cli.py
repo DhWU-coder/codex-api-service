@@ -70,3 +70,23 @@ def test_startup_banner_prints_external_console_and_auth_warning_when_available(
     assert "External API:     http://192.168.1.23:1888/v1" in output
     assert "External Console: http://192.168.1.23:1888/ui" in output
     assert "未配置 API key" in output
+
+
+def test_server_disables_proxy_headers_for_client_ip_integrity(tmp_path: Path, monkeypatch) -> None:
+    """验证直连 IP 不会被本机调用方提供的代理请求头覆盖。"""
+    config = AppConfig(project_root=tmp_path, server=ServerConfig(host="0.0.0.0", port=1888))
+    captured_options: dict[str, object] = {}
+
+    monkeypatch.setattr(app_module, "load_config", lambda **_kwargs: config)
+    monkeypatch.setattr(app_module, "create_app", lambda **_kwargs: "test-app")
+    monkeypatch.setattr(app_module, "_print_startup_banner", lambda _config: None)
+    monkeypatch.setattr(
+        app_module.uvicorn,
+        "run",
+        lambda _app, **options: captured_options.update(options),
+    )
+    monkeypatch.setattr("sys.argv", ["codex-api-service"])
+
+    app_module.main()
+
+    assert captured_options["proxy_headers"] is False
