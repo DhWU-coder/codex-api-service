@@ -29,6 +29,24 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+### 全局使用 CLI
+
+上面的 editable install 会把 `codex-api-service` 命令安装到项目的 `.venv/bin`。如果希望在未激活虚拟环境时也能从任意目录调用，可以在项目根目录创建一个用户级符号链接：
+
+```bash
+mkdir -p "$HOME/.local/bin"
+ln -s "$PWD/.venv/bin/codex-api-service" "$HOME/.local/bin/codex-api-service"
+```
+
+确认 `~/.local/bin` 已加入 shell 的 `PATH`，然后验证：
+
+```bash
+command -v codex-api-service
+codex-api-service --help
+```
+
+该方式只暴露一个 CLI 命令，不会把项目虚拟环境中的 `python`、`pip` 等其他程序加入全局 `PATH`。符号链接仍依赖当前项目路径和 `.venv`；如果移动项目或删除虚拟环境，需要先用 `unlink "$HOME/.local/bin/codex-api-service"` 删除失效链接，再从新的项目根目录重新创建。
+
 ## Codex OAuth
 
 服务会把多个账号隔离保存在项目的 `.codex-oauth/` 目录，并自动导入已有 Codex OAuth 文件，默认位置是 `~/.codex/auth.json`。同步时按凭据中的真实账号标识归档，不会用当前 CLI 账号覆盖另一个项目账号。
