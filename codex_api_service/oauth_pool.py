@@ -12,7 +12,7 @@ from typing import Any
 
 from .auth import CodexAuth, OAuthLoginRequired
 from .codex_client import CodexClient, CodexHTTPStatusError, _codex_client_version
-from .codex_usage import fetch_codex_usage_snapshot
+from .codex_usage import CodexUsageSession, fetch_codex_usage_snapshot
 from .config import AppConfig
 from .oauth_accounts import OAuthAccountRecord, OAuthAccountStore
 from .oauth_login import OAuthLoginManager
@@ -52,6 +52,7 @@ class OAuthAccountPool:
         self._initialize_lock = asyncio.Lock()
         self._initialized = False
         self._background_task: asyncio.Task[None] | None = None
+        self._usage_sessions: dict[str, CodexUsageSession] = {}
         # ContextVar 让同一账户池处理并发请求时，各请求读取到自己的账户信息。
         self._request_account: ContextVar[dict[str, str] | None] = ContextVar(
             f"oauth_request_account_{id(self)}",
@@ -73,10 +74,14 @@ class OAuthAccountPool:
                 asyncio.create_task(self.refresh_account(key))
 
     async def close(self) -> None:
-        """停止账号池后台任务并关闭本地状态库。"""
+        """停止后台任务、额度会话和本地状态库。"""
         if self._background_task is not None:
             self._background_task.cancel()
             await asyncio.gather(self._background_task, return_exceptions=True)
+        sessions = list(self._usage_sessions.values())
+        self._usage_sessions.clear()
+        if sessions:
+            await asyncio.gather(*(session.close() for session in sessions), return_exceptions=True)
         self.bindings.close()
 
     async def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -161,10 +166,14 @@ class OAuthAccountPool:
         runtime = self.runtimes.get(key)
         if runtime is None:
             return None
+        session = self._usage_sessions.get(key)
+        if session is None:
+            session = CodexUsageSession(account_home=self.store.auth_path(key).parent)
+            self._usage_sessions[key] = session
         try:
             usage = await fetch_codex_usage_snapshot(
                 client_version=_codex_client_version(),
-                account_home=str(self.store.auth_path(key).parent),
+                app_server_rpc=session.read_rate_limits,
             )
         except Exception:
             runtime.last_error = "额度读取失败"
@@ -184,6 +193,19 @@ class OAuthAccountPool:
         enabled_keys = [key for key, runtime in self.runtimes.items() if runtime.record.enabled]
         await asyncio.gather(*(self.refresh_account(key) for key in enabled_keys), return_exceptions=True)
         return self.snapshot()
+
+    async def delete_account(self, key: str) -> None:
+        """删除账号，并关闭该账号持有的额度会话。"""
+        if self.store.get(key) is None:
+            raise KeyError(key)
+        if self.store.dispatch_mode == "single" and key == self.store.single_account_key:
+            raise ValueError("select another single account before deleting this account")
+        # app-server 仍以账号目录作为 CODEX_HOME，必须先停进程再删除凭据目录。
+        session = self._usage_sessions.pop(key, None)
+        if session is not None:
+            await session.close()
+        await self.store.delete(key)
+        self._rebuild_runtimes()
 
     def snapshot(self) -> dict[str, Any]:
         """返回不包含 token 的多账号管理快照。"""

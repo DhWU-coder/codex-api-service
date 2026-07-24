@@ -51,6 +51,8 @@ codex-api-service --help
 
 服务会把多个账号隔离保存在项目的 `.codex-oauth/` 目录，并自动导入已有 Codex OAuth 文件，默认位置是 `~/.codex/auth.json`。同步时按凭据中的真实账号标识归档，不会用当前 CLI 账号覆盖另一个项目账号。
 
+各账号的 `auth.json` 会持久保留，正常停止或重启服务不需要重新登录。额度查询会复用每个账号的 Codex app-server，并通过 `CODEX_SQLITE_HOME` 把日志、目标和记忆等 SQLite 运行状态放入服务临时目录；服务关闭时只清理该临时目录，不会删除账号凭据、注册表或项目响应绑定。
+
 你可以先完成 Codex 登录：
 
 ```bash

@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 AppServerRpc = Callable[[str, float], Awaitable[dict[str, Any]]]
@@ -16,6 +18,116 @@ APP_SERVER_TIMEOUT_SECONDS = 20.0
 
 class CodexUsageFetchError(RuntimeError):
     """表示 Codex 额度状态不可用。"""
+
+
+class CodexUsageSession:
+    """复用单个账号的 Codex app-server 额度读取会话。"""
+
+    def __init__(self, *, account_home: str | Path | None) -> None:
+        """保存永久账号目录，运行时 SQLite 将使用独立临时目录。"""
+        self.account_home = Path(account_home).resolve() if account_home is not None else None
+        self._lock = asyncio.Lock()
+        self._process: asyncio.subprocess.Process | None = None
+        self._sqlite_home: tempfile.TemporaryDirectory[str] | None = None
+        self._next_request_id = 1
+        self._closed = False
+
+    async def read_rate_limits(self, client_version: str, timeout: float) -> dict[str, Any]:
+        """在持久 app-server 上读取额度，失效时重启一次。"""
+        async with self._lock:
+            if self._closed:
+                raise CodexUsageFetchError("Codex usage status unavailable")
+            last_error: Exception | None = None
+            for _attempt in range(2):
+                try:
+                    await self._start_locked(client_version, timeout)
+                    process = self._process
+                    if process is None:
+                        raise CodexUsageFetchError("Codex usage status unavailable")
+                    request_id = self._take_request_id()
+                    await _send_rpc(
+                        process,
+                        {
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "method": "account/rateLimits/read",
+                            "params": None,
+                        },
+                    )
+                    return await _read_rpc_result(process, request_id, timeout)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    last_error = error
+                    await self._stop_locked()
+            raise CodexUsageFetchError("Codex usage status unavailable") from last_error
+
+    async def close(self) -> None:
+        """终止 app-server，并只清理本会话创建的临时 SQLite 目录。"""
+        async with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            await self._stop_locked()
+
+    async def _start_locked(self, client_version: str, timeout: float) -> None:
+        """按需启动并初始化 app-server；调用方必须持有会话锁。"""
+        if self._process is not None and self._process.returncode is None:
+            return
+        await self._stop_locked()
+        sqlite_home = tempfile.TemporaryDirectory(prefix="codex-api-service-sqlite-")
+        environment = os.environ.copy()
+        if self.account_home is not None:
+            environment["CODEX_HOME"] = str(self.account_home)
+        environment["CODEX_SQLITE_HOME"] = sqlite_home.name
+        self._sqlite_home = sqlite_home
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                "codex",
+                "app-server",
+                "--stdio",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                env=environment,
+            )
+            request_id = self._take_request_id()
+            await _send_rpc(
+                self._process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {"name": "codex-api-service", "version": client_version},
+                        "capabilities": None,
+                    },
+                },
+            )
+            await _read_rpc_result(self._process, request_id, timeout)
+        except BaseException:
+            await self._stop_locked()
+            raise
+
+    async def _stop_locked(self) -> None:
+        """释放子进程和临时目录；调用方必须持有会话锁。"""
+        process = self._process
+        self._process = None
+        if process is not None:
+            await _terminate_process(process)
+        sqlite_home = self._sqlite_home
+        self._sqlite_home = None
+        if sqlite_home is not None:
+            try:
+                sqlite_home.cleanup()
+            except OSError:
+                pass
+
+    def _take_request_id(self) -> int:
+        """分配当前会话内单调递增的 JSON-RPC 请求 id。"""
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        return request_id
 
 
 async def fetch_codex_usage_snapshot(
@@ -77,40 +189,12 @@ async def _read_rate_limits_from_app_server(
     *,
     account_home: str | None = None,
 ) -> dict[str, Any]:
-    """短暂启动 Codex app-server，通过官方 RPC 读取额度快照。"""
-    environment = os.environ.copy()
-    if account_home:
-        environment["CODEX_HOME"] = account_home
-    process = await asyncio.create_subprocess_exec(
-        "codex",
-        "app-server",
-        "--stdio",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-        env=environment,
-    )
+    """使用一次性隔离会话，通过官方 RPC 读取额度快照。"""
+    session = CodexUsageSession(account_home=account_home)
     try:
-        await _send_rpc(
-            process,
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "clientInfo": {"name": "codex-api-service", "version": client_version},
-                    "capabilities": None,
-                },
-            },
-        )
-        await _read_rpc_result(process, 1, timeout)
-        await _send_rpc(
-            process,
-            {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": None},
-        )
-        return await _read_rpc_result(process, 2, timeout)
+        return await session.read_rate_limits(client_version, timeout)
     finally:
-        await _terminate_process(process)
+        await session.close()
 
 
 async def _send_rpc(process: asyncio.subprocess.Process, message: dict[str, Any]) -> None:

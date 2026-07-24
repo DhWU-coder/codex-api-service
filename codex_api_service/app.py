@@ -537,12 +537,11 @@ def create_app(
         if account_pool is None:
             raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
         try:
-            await account_pool.store.delete(account_key)
+            await account_pool.delete_account(account_key)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="OAuth account not found") from error
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        account_pool._rebuild_runtimes()
         return account_pool.snapshot()
 
     @app.post("/admin/oauth/accounts/{account_key}/refresh")

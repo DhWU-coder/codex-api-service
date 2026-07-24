@@ -32,11 +32,13 @@ pip install -e ".[dev]"
 
 ## Codex OAuth
 
-The service first uses its own auth file. If no local service auth is available, it automatically imports an existing Codex OAuth file from the default location:
+The service stores accounts separately under the project's `.codex-oauth/` directory. It automatically imports an existing Codex OAuth file from the default location:
 
 ```text
 ~/.codex/auth.json
 ```
+
+Each account's `auth.json` remains persistent, so a normal service stop or restart does not require another login. Usage refreshes reuse one Codex app-server per account and set `CODEX_SQLITE_HOME` to a service-owned temporary directory for SQLite-backed logs, goals, and memories. Shutdown removes only that temporary runtime state; account credentials, the registry, and response bindings remain intact.
 
 You can complete Codex login first:
 
