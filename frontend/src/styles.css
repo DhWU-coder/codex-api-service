@@ -1786,6 +1786,20 @@ th {
   gap: 14px;
 }
 
+/* 主额度卡片作为详情入口时提供明确的鼠标和键盘反馈。 */
+.codex-limit-card.interactive {
+  cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.codex-limit-card.interactive:hover,
+.codex-limit-card.interactive:focus-visible {
+  border-color: color-mix(in srgb, var(--primary-bg) 62%, var(--panel-border));
+  box-shadow: 0 12px 30px color-mix(in srgb, var(--primary-bg) 14%, transparent);
+  outline: none;
+  transform: translateY(-1px);
+}
+
 .codex-limit-card-head {
   display: flex;
   gap: 12px;
@@ -1797,6 +1811,19 @@ th {
   margin: 0;
   color: var(--page-title);
   font-size: 17px;
+}
+
+.codex-limit-card-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.codex-limit-detail-hint {
+  color: var(--page-muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .codex-limit-windows {
@@ -1836,9 +1863,14 @@ th {
   background: var(--primary-bg);
 }
 
-.codex-additional-limits {
+.codex-account-usage {
   display: grid;
   gap: 14px;
+}
+
+/* 额度抽屉按主额度、额外模型额度的顺序纵向排列。 */
+.quota-detail-drawer-body {
+  grid-auto-rows: max-content;
 }
 
 /* 窄屏下侧栏改为顶部，保证移动设备可用。 */

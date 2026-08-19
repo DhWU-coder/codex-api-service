@@ -138,6 +138,10 @@ type DispatchEditorState = {
   error: string;
 };
 
+type QuotaDetailSelection =
+  | { source: "account"; accountKey: string }
+  | { source: "single" };
+
 function accountLoadScale(snapshot: OAuthAccountsSnapshot): number {
   // 统一刻度保证不同账号的负载条可以直接比较。
   return Math.max(
@@ -546,14 +550,39 @@ function formatPlanType(planType: string): string {
   return `${normalized.slice(0, 1).toUpperCase()}${normalized.slice(1).toLowerCase()}`;
 }
 
-function UsageLimitCard({ title, rateLimit }: { title: string; rateLimit: CodexUsageRateLimit }) {
+function UsageLimitCard({
+  title,
+  rateLimit,
+  detailLabel,
+  onOpen
+}: {
+  title: string;
+  rateLimit: CodexUsageRateLimit;
+  detailLabel?: string;
+  onOpen?: () => void;
+}) {
   return (
-    <section className="codex-limit-card">
+    <section
+      aria-label={onOpen ? detailLabel || `查看 ${title}详情` : undefined}
+      className={`codex-limit-card ${onOpen ? "interactive" : ""}`}
+      onClick={onOpen}
+      onKeyDown={onOpen ? (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen();
+        }
+      } : undefined}
+      role={onOpen ? "button" : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+    >
       <div className="codex-limit-card-head">
         <h3>{title}</h3>
-        <span className={rateLimit.limitReached ? "status-fail" : "status-ok"}>
-          {rateLimit.limitReached ? "已触达" : rateLimit.allowed ? "可用" : "不可用"}
-        </span>
+        <div className="codex-limit-card-head-actions">
+          <span className={rateLimit.limitReached ? "status-fail" : "status-ok"}>
+            {rateLimit.limitReached ? "已触达" : rateLimit.allowed ? "可用" : "不可用"}
+          </span>
+          {onOpen ? <span className="codex-limit-detail-hint">查看详情 →</span> : null}
+        </div>
       </div>
       <div className="codex-limit-windows">
         {rateLimit.windows.map((window) => (
@@ -607,6 +636,7 @@ export function App() {
   const [isLoadingOauthAccounts, setIsLoadingOauthAccounts] = useState(false);
   const [oauthLoginSession, setOauthLoginSession] = useState<OAuthLoginSession | null>(null);
   const [isCancellingOAuthLogin, setIsCancellingOAuthLogin] = useState(false);
+  const [quotaDetailSelection, setQuotaDetailSelection] = useState<QuotaDetailSelection | null>(null);
   const [accountEditor, setAccountEditor] = useState<AccountEditorState | null>(null);
   const [dispatchEditor, setDispatchEditor] = useState<DispatchEditorState | null>(null);
   const [dashboardPreset, setDashboardPreset] = useState<DashboardRangePreset>("today");
@@ -626,6 +656,32 @@ export function App() {
   const modelRequestDirtyRef = useRef(false);
   const oauthLoginPollRef = useRef<{ sessionId: string; token: number } | null>(null);
   const oauthLoginPollTokenRef = useRef(0);
+
+  // 抽屉始终从最新额度快照派生内容，刷新后无需重新打开。
+  const selectedQuotaDetails = useMemo(() => {
+    if (!quotaDetailSelection) {
+      return null;
+    }
+    if (quotaDetailSelection.source === "account") {
+      const account = oauthAccounts?.accounts.find((item) => item.key === quotaDetailSelection.accountKey);
+      if (!account?.usage) {
+        return null;
+      }
+      return {
+        accountLabel: account.alias,
+        planType: account.usage.planType,
+        usage: account.usage
+      };
+    }
+    if (!codexUsage) {
+      return null;
+    }
+    return {
+      accountLabel: "当前 Codex 账号",
+      planType: codexUsage.planType,
+      usage: codexUsage
+    };
+  }, [codexUsage, oauthAccounts, quotaDetailSelection]);
 
   // layout effect 可以在浏览器绘制前应用主题，避免启动时闪一下错误主题。
   useLayoutEffect(() => {
@@ -1235,6 +1291,20 @@ export function App() {
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [selectedLogId]);
+
+  // 额度详情打开时支持 Escape 关闭，并在状态变化时清理监听。
+  useEffect(() => {
+    if (!selectedQuotaDetails) {
+      return;
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setQuotaDetailSelection(null);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [selectedQuotaDetails]);
 
   // 切换加载数量时立即读取对应范围，全部模式仍由虚拟列表控制 DOM 数量。
   const changeRequestLogLimit = useCallback(
@@ -2282,7 +2352,7 @@ export function App() {
                   <div><span>全局当前并发</span><strong>{oauthAccounts.globalCurrentConcurrency}</strong></div>
                 </section>
                 {oauthAccounts.accounts.filter((account) => account.usage).map((account) => (
-                  <section className="codex-additional-limits" key={account.key}>
+                  <section className="codex-account-usage" key={account.key}>
                     <div className="oauth-account-head">
                       <div><h3>{account.alias}</h3><p><strong>{formatPlanType(account.usage?.planType || "-")}</strong> · 预计占比 {Math.round(account.estimatedShare * 100)}%</p></div>
                       <span className="status-badge ok">{account.status}</span>
@@ -2293,10 +2363,14 @@ export function App() {
                         {account.lastError}
                       </div>
                     ) : null}
-                    {account.usage ? <UsageLimitCard title="Codex 主额度" rateLimit={account.usage.rateLimit} /> : null}
-                    {account.usage?.additionalRateLimits.map((item) => (
-                      <UsageLimitCard key={item.meteredFeature || item.limitName} title={item.limitName} rateLimit={item.rateLimit} />
-                    ))}
+                    {account.usage ? (
+                      <UsageLimitCard
+                        detailLabel={`查看 ${account.alias} Codex 主额度详情`}
+                        onOpen={() => setQuotaDetailSelection({ source: "account", accountKey: account.key })}
+                        rateLimit={account.usage.rateLimit}
+                        title="Codex 主额度"
+                      />
+                    ) : null}
                   </section>
                 ))}
               </div>
@@ -2317,15 +2391,12 @@ export function App() {
                   </div>
                 </section>
 
-                <UsageLimitCard title="Codex 主额度" rateLimit={codexUsage.rateLimit} />
-
-                {codexUsage.additionalRateLimits.length ? (
-                  <div className="codex-additional-limits">
-                    {codexUsage.additionalRateLimits.map((item) => (
-                      <UsageLimitCard key={item.limitName} title={item.limitName} rateLimit={item.rateLimit} />
-                    ))}
-                  </div>
-                ) : null}
+                <UsageLimitCard
+                  detailLabel="查看 当前 Codex 账号 Codex 主额度详情"
+                  onOpen={() => setQuotaDetailSelection({ source: "single" })}
+                  rateLimit={codexUsage.rateLimit}
+                  title="Codex 主额度"
+                />
               </div>
             ) : !isLoadingCodexUsage ? (
               <div className="empty-state">
@@ -2337,6 +2408,50 @@ export function App() {
           </section>
         ) : null}
       </main>
+
+      {selectedQuotaDetails ? (
+        <div
+          className="request-log-drawer-backdrop"
+          data-testid="quota-detail-drawer-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setQuotaDetailSelection(null);
+            }
+          }}
+        >
+          <aside
+            aria-labelledby="quota-detail-drawer-title"
+            aria-modal="true"
+            className="request-log-drawer quota-detail-drawer"
+            role="dialog"
+          >
+            <header className="request-log-drawer-head">
+              <div>
+                <span>{selectedQuotaDetails.accountLabel} · {formatPlanType(selectedQuotaDetails.planType)}</span>
+                <h2 id="quota-detail-drawer-title">额度详情</h2>
+              </div>
+              <button
+                aria-label="关闭额度详情"
+                className="icon-button"
+                onClick={() => setQuotaDetailSelection(null)}
+                type="button"
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="request-log-drawer-body quota-detail-drawer-body">
+              <UsageLimitCard title="Codex 主额度" rateLimit={selectedQuotaDetails.usage.rateLimit} />
+              {selectedQuotaDetails.usage.additionalRateLimits.map((item) => (
+                <UsageLimitCard
+                  key={item.meteredFeature || item.limitName}
+                  title={item.limitName}
+                  rateLimit={item.rateLimit}
+                />
+              ))}
+            </div>
+          </aside>
+        </div>
+      ) : null}
 
       {selectedLog ? (
         <div

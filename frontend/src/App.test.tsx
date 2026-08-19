@@ -508,8 +508,8 @@ describe("App theme mode", () => {
     expect(await screen.findByLabelText("gpt-5.6-mini Effort")).toBeTruthy();
   });
 
-  it("shows Codex usage status in an independent tab under model config", async () => {
-    // 额度状态是模型配置下方的独立导航页，不混进模型配置表单。
+  it("shows only primary quota until the account detail drawer opens", async () => {
+    // 主页面保持紧凑，额外模型额度只在点击主额度后的右侧抽屉展示。
     render(<App />);
 
     const navButtons = await screen.findAllByRole("button");
@@ -526,10 +526,53 @@ describe("App theme mode", () => {
     expect(await screen.findByText("67%")).toBeTruthy();
     expect((await screen.findAllByText("Weekly 剩余")).length).toBeGreaterThan(0);
     expect(await screen.findByText("79%")).toBeTruthy();
+    expect(screen.queryByText("GPT-5.3-Codex-Spark")).toBeNull();
+
+    const primaryQuota = await screen.findByRole("button", { name: "查看 账号 A Codex 主额度详情" });
+    fireEvent.click(primaryQuota);
+
+    expect(await screen.findByRole("dialog", { name: "额度详情" })).toBeTruthy();
     expect(await screen.findByText("GPT-5.3-Codex-Spark")).toBeTruthy();
     await waitFor(() => {
       expect(capturedRequests.some((request) => request.url === "/admin/codex/usage")).toBe(true);
     });
+  });
+
+  it("closes the quota detail drawer by button, backdrop and Escape", async () => {
+    // 额度详情沿用右滑抽屉的三种关闭方式，避免用户被困在遮罩层中。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "额度状态" }));
+    const primaryQuota = await screen.findByRole("button", { name: "查看 账号 A Codex 主额度详情" });
+
+    fireEvent.click(primaryQuota);
+    fireEvent.click(await screen.findByRole("button", { name: "关闭额度详情" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "额度详情" })).toBeNull());
+
+    fireEvent.click(primaryQuota);
+    fireEvent.mouseDown(await screen.findByTestId("quota-detail-drawer-backdrop"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "额度详情" })).toBeNull());
+
+    fireEvent.click(primaryQuota);
+    await screen.findByRole("dialog", { name: "额度详情" });
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "额度详情" })).toBeNull());
+  });
+
+  it("uses the same quota detail drawer for the single-account fallback", async () => {
+    // 没有多账号额度时，兼容数据源也只在主页面展示主额度。
+    oauthAccountsResponse = { ...oauthAccountsStatus, accounts: [] };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "额度状态" }));
+
+    const primaryQuota = await screen.findByRole("button", {
+      name: "查看 当前 Codex 账号 Codex 主额度详情"
+    });
+    expect(screen.queryByText("GPT-5.3-Codex-Spark")).toBeNull();
+
+    fireEvent.click(primaryQuota);
+
+    expect(await screen.findByRole("dialog", { name: "额度详情" })).toBeTruthy();
+    expect(await screen.findByText("GPT-5.3-Codex-Spark")).toBeTruthy();
   });
 
   it("refreshes the visible multi-account quota snapshot", async () => {
