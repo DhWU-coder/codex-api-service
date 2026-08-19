@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   buildAuthHeaders,
+  cancelOAuthLogin,
   fetchAdminModels,
+  fetchActiveOAuthLogin,
   fetchCodexUsage,
   fetchDashboardSummary,
   parseChatStreamLine,
@@ -132,6 +134,53 @@ describe("frontend api helpers", () => {
       {
         url: "/admin/oauth/accounts/refresh",
         method: "POST",
+        authorization: "Bearer local-secret"
+      }
+    ]);
+    vi.unstubAllGlobals();
+  });
+
+  it("reads and cancels the active OAuth login session", async () => {
+    // 页面恢复和主动取消都必须复用本地管理接口，并继续携带管理密钥。
+    const requests: Array<{ url: string; method: string; authorization: string | null }> = [];
+    const session = {
+      id: "login-active",
+      deviceAuth: false,
+      status: "waiting",
+      message: "等待浏览器完成登录",
+      output: [],
+      accountKey: null
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        requests.push({
+          url: String(input),
+          method: init?.method || "GET",
+          authorization: headers.get("Authorization")
+        });
+        if (String(input).endsWith("/active")) {
+          return new Response(JSON.stringify({ session }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ...session, status: "cancelled", message: "登录已取消" }), {
+          status: 200
+        });
+      })
+    );
+
+    expect(await fetchActiveOAuthLogin("local-secret")).toEqual(session);
+    expect((await cancelOAuthLogin("local-secret", session.id)).status).toBe("cancelled");
+
+    expect(requests).toEqual([
+      {
+        url: "/admin/oauth/login/active",
+        method: "GET",
+        authorization: "Bearer local-secret"
+      },
+      {
+        url: "/admin/oauth/login/login-active",
+        method: "DELETE",
         authorization: "Bearer local-secret"
       }
     ]);

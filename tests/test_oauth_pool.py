@@ -234,7 +234,7 @@ async def test_refresh_account_keeps_existing_refresh_intervals(
 
 @pytest.mark.asyncio
 async def test_pool_close_closes_all_usage_sessions(tmp_path: Path) -> None:
-    """验证服务关闭会释放所有账号的 app-server 会话。"""
+    """验证服务关闭会释放登录任务和所有账号的 app-server 会话。"""
     pool = OAuthAccountPool(
         config=AppConfig(
             project_root=tmp_path,
@@ -244,9 +244,18 @@ async def test_pool_close_closes_all_usage_sessions(tmp_path: Path) -> None:
     first = FakeUsageSession(usage_snapshot(50))
     second = FakeUsageSession(usage_snapshot(50))
     pool._usage_sessions = {"account-a": first, "account-b": second}
+    login_close_count = 0
+
+    async def close_login_manager() -> None:
+        """记录账号池是否联动关闭 OAuth 登录管理器。"""
+        nonlocal login_close_count
+        login_close_count += 1
+
+    pool.login.close = close_login_manager  # type: ignore[method-assign]
 
     await pool.close()
 
+    assert login_close_count == 1
     assert first.close_count == 1
     assert second.close_count == 1
     assert pool._usage_sessions == {}

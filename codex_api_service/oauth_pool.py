@@ -78,6 +78,7 @@ class OAuthAccountPool:
         if self._background_task is not None:
             self._background_task.cancel()
             await asyncio.gather(self._background_task, return_exceptions=True)
+        await self.login.close()
         sessions = list(self._usage_sessions.values())
         self._usage_sessions.clear()
         if sessions:

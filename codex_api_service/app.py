@@ -480,10 +480,15 @@ def create_app(
         if account_pool is None:
             raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
         body = await request.json()
-        try:
-            return await account_pool.login.start(device_auth=bool(body.get("deviceAuth", False)))
-        except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+        return await account_pool.login.start(device_auth=bool(body.get("deviceAuth", False)))
+
+    @app.get("/admin/oauth/login/active")
+    async def admin_oauth_login_active(request: Request) -> dict[str, Any]:
+        """返回当前活动登录，供页面刷新后恢复进度。"""
+        _require_local_auth(request, app_config)
+        if account_pool is None:
+            raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
+        return {"session": account_pool.login.active()}
 
     @app.get("/admin/oauth/login/{session_id}")
     async def admin_oauth_login_status(session_id: str, request: Request) -> dict[str, Any]:

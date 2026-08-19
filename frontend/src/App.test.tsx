@@ -183,6 +183,7 @@ describe("App theme mode", () => {
   let modelCatalogResponse = adminModelCatalog;
   let requestLogsResponse = requestLogItems;
   let oauthLoginStartResponse: Record<string, unknown> | null = null;
+  let oauthActiveLoginResponse: Record<string, unknown> | null = null;
   let oauthAccountsResponse = oauthAccountsStatus;
   let oauthAccountsRefreshResponse = oauthAccountsStatus;
 
@@ -194,6 +195,7 @@ describe("App theme mode", () => {
     modelCatalogResponse = adminModelCatalog;
     requestLogsResponse = requestLogItems;
     oauthLoginStartResponse = null;
+    oauthActiveLoginResponse = null;
     oauthAccountsResponse = oauthAccountsStatus;
     oauthAccountsRefreshResponse = oauthAccountsStatus;
 
@@ -276,6 +278,9 @@ describe("App theme mode", () => {
         if (url === "/admin/oauth/accounts/account-a" && method === "PATCH") {
           return new Response(JSON.stringify(oauthAccountsResponse), { status: 200 });
         }
+        if (url === "/admin/oauth/login/active") {
+          return new Response(JSON.stringify({ session: oauthActiveLoginResponse }), { status: 200 });
+        }
         if (url === "/admin/oauth/dispatch" && method === "PUT") {
           return new Response(JSON.stringify({ ...oauthAccountsStatus, dispatchMode: "single", singleAccountKey: "account-a" }), {
             status: 200
@@ -283,6 +288,17 @@ describe("App theme mode", () => {
         }
         if (url === "/admin/oauth/login" && method === "POST" && oauthLoginStartResponse) {
           return new Response(JSON.stringify(oauthLoginStartResponse), { status: 200 });
+        }
+        if (url.startsWith("/admin/oauth/login/") && method === "DELETE" && oauthActiveLoginResponse) {
+          oauthActiveLoginResponse = {
+            ...oauthActiveLoginResponse,
+            status: "cancelled",
+            message: "登录已取消"
+          };
+          return new Response(JSON.stringify(oauthActiveLoginResponse), { status: 200 });
+        }
+        if (url.startsWith("/admin/oauth/login/") && oauthActiveLoginResponse) {
+          return new Response(JSON.stringify(oauthActiveLoginResponse), { status: 200 });
         }
         if (url === "/v1/chat/completions") {
           const streamBody =
@@ -694,6 +710,58 @@ describe("App theme mode", () => {
     expect(await screen.findByText("OAuth 账号添加成功")).toBeTruthy();
     expect(screen.queryByText("Successfully logged in")).toBeNull();
     await waitFor(() => expect(screen.queryByText("OAuth 账号添加成功")).toBeNull(), { timeout: 4000 });
+  });
+
+  it("restores an active OAuth login and lets the user cancel it", async () => {
+    // 页面刷新后应从后端恢复登录状态，取消时终止同一个会话。
+    oauthActiveLoginResponse = {
+      id: "login-active",
+      deviceAuth: false,
+      status: "waiting",
+      message: "等待浏览器完成登录",
+      output: ["请在浏览器中完成授权"],
+      accountKey: null
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+
+    expect(await screen.findByText("等待浏览器完成登录")).toBeTruthy();
+    expect(await screen.findByText("请在浏览器中完成授权")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "取消登录" }));
+
+    expect(await screen.findByText("登录已取消")).toBeTruthy();
+    expect(capturedRequests).toContainEqual({
+      url: "/admin/oauth/login/login-active",
+      method: "DELETE"
+    });
+  });
+
+  it("reuses the same waiting session when relogin is clicked again", async () => {
+    // 账号卡片重复点击重新登录时仍向后端请求接管，不产生第二个前端轮询器。
+    oauthLoginStartResponse = {
+      id: "login-reused",
+      deviceAuth: false,
+      status: "waiting",
+      message: "等待浏览器完成登录",
+      output: [],
+      accountKey: null
+    };
+    oauthActiveLoginResponse = oauthLoginStartResponse;
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    const relogin = await screen.findByRole("button", { name: "重新登录" });
+
+    fireEvent.click(relogin);
+    fireEvent.click(relogin);
+
+    await waitFor(() => {
+      expect(
+        capturedRequests.filter(
+          (request) => request.url === "/admin/oauth/login" && request.method === "POST"
+        )
+      ).toHaveLength(2);
+    });
+    expect(await screen.findByText("等待浏览器完成登录")).toBeTruthy();
   });
 
   it("edits account alias in a themed dialog", async () => {

@@ -343,6 +343,26 @@ textarea {
   background: var(--error-bg);
 }
 
+/* OAuth 登录提示允许右侧取消，同时让较长的 CLI 提示在左侧自然换行。 */
+.oauth-login-banner {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.oauth-login-banner-content {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+  overflow-wrap: anywhere;
+}
+
+.oauth-login-cancel-button {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 12px;
+}
+
 /* 聊天布局占满剩余高度，输入框固定在底部。 */
 .chat-layout,
 .panel {

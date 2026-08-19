@@ -25,6 +25,7 @@ import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 
 import {
   buildAuthHeaders,
+  cancelOAuthLogin,
   fetchAdminHealth,
   fetchAdminConfig,
   fetchCodexUsage,
@@ -32,6 +33,7 @@ import {
   fetchAdminModels,
   fetchRequestLogs,
   fetchOAuthAccounts,
+  fetchActiveOAuthLogin,
   saveOAuthDispatch,
   syncOAuthAccounts,
   updateOAuthAccount,
@@ -604,6 +606,7 @@ export function App() {
   const [oauthAccounts, setOauthAccounts] = useState<OAuthAccountsSnapshot | null>(null);
   const [isLoadingOauthAccounts, setIsLoadingOauthAccounts] = useState(false);
   const [oauthLoginSession, setOauthLoginSession] = useState<OAuthLoginSession | null>(null);
+  const [isCancellingOAuthLogin, setIsCancellingOAuthLogin] = useState(false);
   const [accountEditor, setAccountEditor] = useState<AccountEditorState | null>(null);
   const [dispatchEditor, setDispatchEditor] = useState<DispatchEditorState | null>(null);
   const [dashboardPreset, setDashboardPreset] = useState<DashboardRangePreset>("today");
@@ -621,6 +624,8 @@ export function App() {
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const modelRequestDirtyRef = useRef(false);
+  const oauthLoginPollRef = useRef<{ sessionId: string; token: number } | null>(null);
+  const oauthLoginPollTokenRef = useRef(0);
 
   // layout effect 可以在浏览器绘制前应用主题，避免启动时闪一下错误主题。
   useLayoutEffect(() => {
@@ -808,24 +813,93 @@ export function App() {
     }
   }, [apiKey, dispatchEditor]);
 
-  const beginOAuthLogin = useCallback(async (deviceAuth = false) => {
+  const watchOAuthLogin = useCallback(async (initialSession: OAuthLoginSession) => {
+    setOauthLoginSession(initialSession);
+    if (initialSession.status !== "waiting") {
+      if (initialSession.status === "success") {
+        await loadOAuthAccounts();
+      }
+      return;
+    }
+    if (oauthLoginPollRef.current?.sessionId === initialSession.id) {
+      return;
+    }
+    const token = oauthLoginPollTokenRef.current + 1;
+    oauthLoginPollTokenRef.current = token;
+    oauthLoginPollRef.current = { sessionId: initialSession.id, token };
+    const isCurrentPoll = () => oauthLoginPollRef.current?.token === token;
+    let session = initialSession;
     try {
-      setError("");
-      let session = await startOAuthLogin(apiKey, deviceAuth);
-      setOauthLoginSession(session);
-      // 登录最多等待十分钟；后端负责浏览器回调和临时目录清理。
-      for (let attempt = 0; attempt < 600 && session.status === "waiting"; attempt += 1) {
+      // 十分钟超时由后端统一执行；页面只观察同一个活动会话。
+      while (session.status === "waiting" && isCurrentPoll()) {
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        if (!isCurrentPoll()) {
+          return;
+        }
         session = await fetchOAuthLoginStatus(apiKey, session.id);
+        if (!isCurrentPoll()) {
+          return;
+        }
         setOauthLoginSession(session);
       }
-      if (session.status === "success") {
+      if (session.status === "success" && isCurrentPoll()) {
         await loadOAuthAccounts();
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "OAuth 登录失败");
+      if (isCurrentPoll()) {
+        setError(caught instanceof Error ? caught.message : "OAuth 登录失败");
+      }
+    } finally {
+      if (isCurrentPoll()) {
+        oauthLoginPollRef.current = null;
+      }
     }
   }, [apiKey, loadOAuthAccounts]);
+
+  const beginOAuthLogin = useCallback(async (deviceAuth = false) => {
+    try {
+      setError("");
+      await watchOAuthLogin(await startOAuthLogin(apiKey, deviceAuth));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "OAuth 登录失败");
+    }
+  }, [apiKey, watchOAuthLogin]);
+
+  const cancelActiveOAuthLogin = useCallback(async () => {
+    if (!oauthLoginSession || oauthLoginSession.status !== "waiting" || isCancellingOAuthLogin) {
+      return;
+    }
+    oauthLoginPollRef.current = null;
+    setIsCancellingOAuthLogin(true);
+    try {
+      setError("");
+      setOauthLoginSession(await cancelOAuthLogin(apiKey, oauthLoginSession.id));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "OAuth 登录取消失败");
+    } finally {
+      setIsCancellingOAuthLogin(false);
+    }
+  }, [apiKey, isCancellingOAuthLogin, oauthLoginSession]);
+
+  useEffect(() => {
+    let disposed = false;
+    void (async () => {
+      try {
+        const activeSession = await fetchActiveOAuthLogin(apiKey);
+        if (!disposed && activeSession) {
+          await watchOAuthLogin(activeSession);
+        }
+      } catch (caught) {
+        if (!disposed) {
+          setError(caught instanceof Error ? caught.message : "OAuth 活动登录读取失败");
+        }
+      }
+    })();
+    return () => {
+      disposed = true;
+      oauthLoginPollRef.current = null;
+    };
+  }, [apiKey, watchOAuthLogin]);
 
   useEffect(() => {
     if (oauthLoginSession?.status !== "success") {
@@ -1978,14 +2052,25 @@ export function App() {
             </header>
 
             {oauthLoginSession ? (
-              <div className={`banner ${oauthLoginSession.status === "failed" ? "error" : ""}`}>
-                <KeyRound size={18} />
-                <div>
-                  <strong>{oauthLoginSession.message}</strong>
-                  {oauthLoginSession.status === "waiting"
-                    ? oauthLoginSession.output.map((line) => <div key={line}>{line}</div>)
-                    : null}
+              <div className={`banner oauth-login-banner ${oauthLoginSession.status === "failed" ? "error" : ""}`}>
+                <div className="oauth-login-banner-content">
+                  <KeyRound size={18} />
+                  <div>
+                    <strong>{oauthLoginSession.message}</strong>
+                    {oauthLoginSession.status === "waiting"
+                      ? oauthLoginSession.output.map((line, index) => <div key={`${index}-${line}`}>{line}</div>)
+                      : null}
+                  </div>
                 </div>
+                {oauthLoginSession.status === "waiting" ? (
+                  <button
+                    className="secondary-button oauth-login-cancel-button"
+                    onClick={() => void cancelActiveOAuthLogin()}
+                    disabled={isCancellingOAuthLogin}
+                  >
+                    {isCancellingOAuthLogin ? "取消中…" : "取消登录"}
+                  </button>
+                ) : null}
               </div>
             ) : null}
 

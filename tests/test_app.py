@@ -19,6 +19,7 @@ from codex_api_service.config import (
     UsageConfig,
 )
 from codex_api_service.model_catalog import ModelCatalogEntry, ModelCatalogSnapshot
+from codex_api_service.oauth_login import OAuthLoginSession
 from codex_api_service.oauth_scheduler import BoundAccountUnavailable
 
 
@@ -1062,6 +1063,33 @@ async def test_admin_oauth_dispatch_updates_mode_and_snapshot(tmp_path: Path) ->
     enabled = {item["key"] for item in body["accounts"] if item["enabled"]}
     assert enabled == {account_b.key}
     assert account_a.key not in enabled
+
+
+@pytest.mark.asyncio
+async def test_admin_oauth_login_active_and_repeated_start_reuse_session(tmp_path: Path) -> None:
+    """验证页面可恢复活动登录，重复启动会接管同一后端会话。"""
+    app = create_app(config=make_test_config(tmp_path))
+    pool = app.state.oauth_account_pool
+    pool._initialized = True
+    session = OAuthLoginSession(id="login-active", device_auth=False)
+    pool.login.sessions[session.id] = session
+    pool.login._active_id = session.id
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            active_response = await client.get("/admin/oauth/login/active")
+            repeated_response = await client.post(
+                "/admin/oauth/login",
+                json={"deviceAuth": True},
+            )
+
+        assert active_response.status_code == 200
+        assert active_response.json() == {"session": session.snapshot()}
+        assert repeated_response.status_code == 200
+        assert repeated_response.json()["id"] == session.id
+        assert repeated_response.json()["deviceAuth"] is False
+    finally:
+        await pool.close()
 
 
 @pytest.mark.asyncio

@@ -232,6 +232,28 @@ export async function fetchOAuthLoginStatus(apiKey: string, sessionId: string): 
   return (await response.json()) as OAuthLoginSession;
 }
 
+export async function fetchActiveOAuthLogin(apiKey: string): Promise<OAuthLoginSession | null> {
+  const response = await fetch("/admin/oauth/login/active", {
+    headers: buildAuthHeaders(apiKey)
+  });
+  if (!response.ok) {
+    throw new Error(`OAuth 活动登录读取失败：${await responseErrorMessage(response)}`);
+  }
+  const body = (await response.json()) as { session: OAuthLoginSession | null };
+  return body.session;
+}
+
+export async function cancelOAuthLogin(apiKey: string, sessionId: string): Promise<OAuthLoginSession> {
+  const response = await fetch(`/admin/oauth/login/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+    headers: buildAuthHeaders(apiKey)
+  });
+  if (!response.ok) {
+    throw new Error(`OAuth 登录取消失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as OAuthLoginSession;
+}
+
 // 读取 API 请求日志；limit=all 时用于本地看板全量统计。
 export async function fetchRequestLogs(apiKey: string, limit: number | "all" = 100): Promise<RequestLogItem[]> {
   const response = await fetch(`/admin/requests?limit=${encodeURIComponent(String(limit))}`, {
