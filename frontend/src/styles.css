@@ -1868,6 +1868,11 @@ th {
   gap: 14px;
 }
 
+/* 额度详情在桌面端使用更宽视野，请求详情继续保持原尺寸。 */
+.quota-detail-drawer {
+  width: min(60vw, calc(100vw - 32px));
+}
+
 /* 额度抽屉按主额度、额外模型额度的顺序纵向排列。 */
 .quota-detail-drawer-body {
   grid-auto-rows: max-content;
@@ -1976,6 +1981,10 @@ th {
 
   .log-controls {
     grid-template-columns: 1fr;
+  }
+
+  .quota-detail-drawer {
+    width: 100%;
   }
 }
 .oauth-account-list {
