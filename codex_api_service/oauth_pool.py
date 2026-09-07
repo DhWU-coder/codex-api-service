@@ -21,6 +21,22 @@ from .oauth_sync import OAuthSyncService
 from .response_bindings import ResponseBindingStore
 
 
+def _integer(value: Any) -> int:
+    """把额度窗口时长安全转换为整数。"""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _positive_number(value: Any) -> bool:
+    """判断额度窗口是否包含可用于调度的正时长。"""
+    try:
+        return float(value or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 @dataclass
 class AccountRuntime:
     """保存单个账号客户端与可公开的运行状态。"""
@@ -178,11 +194,13 @@ class OAuthAccountPool:
             )
         except Exception:
             runtime.last_error = "额度读取失败"
+            # 保留最后一次成功快照，同时安排退避重试，避免失败时每五秒重启 app-server。
+            runtime.next_refresh_at = time.time() + 30
             return None
         runtime.usage = usage
         runtime.status = "available" if usage.get("rateLimit", {}).get("allowed", True) else "rate_limited"
         runtime.last_error = None
-        primary = self._primary_window(usage)
+        primary = self._dispatch_window(usage)
         remaining = float(primary.get("remainingPercent", 100)) if primary else 100.0
         interval = 30 if remaining < 5 else 60 if remaining < 10 else 300
         runtime.next_refresh_at = time.time() + interval
@@ -217,7 +235,12 @@ class OAuthAccountPool:
         from .oauth_scheduler import account_dispatch_weight
 
         for candidate in candidates:
-            weights[candidate.key] = account_dispatch_weight(candidate)
+            # 预计占比只统计实际会参与调度的账号，避免停用或限流账号稀释分母。
+            weights[candidate.key] = (
+                account_dispatch_weight(candidate)
+                if candidate.enabled and candidate.status == "available"
+                else 0.0
+            )
         weight_total = sum(weights.values()) or 1.0
         for record in self.store.list():
             runtime = self.runtimes.get(record.key)
@@ -333,7 +356,7 @@ class OAuthAccountPool:
         """把账号运行状态转换为调度快照。"""
         candidates = []
         for runtime in self.runtimes.values():
-            primary = self._primary_window(runtime.usage)
+            primary = self._dispatch_window(runtime.usage)
             candidates.append(
                 AccountCandidate(
                     key=runtime.record.key,
@@ -380,8 +403,26 @@ class OAuthAccountPool:
         )
 
     @staticmethod
-    def _primary_window(usage: dict[str, Any] | None) -> dict[str, Any]:
+    def _dispatch_window(usage: dict[str, Any] | None) -> dict[str, Any]:
+        """优先选择真实 5 小时窗口，没有时回退到最短有效窗口。"""
         if not isinstance(usage, dict):
             return {}
-        windows = usage.get("rateLimit", {}).get("windows", [])
-        return next((item for item in windows if isinstance(item, dict) and item.get("kind") == "primary"), {})
+        rate_limit = usage.get("rateLimit")
+        windows = rate_limit.get("windows", []) if isinstance(rate_limit, dict) else []
+        valid_windows = [
+            item
+            for item in windows
+            if isinstance(item, dict) and _positive_number(item.get("limitWindowSeconds"))
+        ]
+        five_hour = next(
+            (item for item in valid_windows if _integer(item.get("limitWindowSeconds")) == 5 * 60 * 60),
+            None,
+        )
+        if five_hour is not None:
+            return five_hour
+        return min(valid_windows, key=lambda item: _integer(item.get("limitWindowSeconds")), default={})
+
+    @staticmethod
+    def _primary_window(usage: dict[str, Any] | None) -> dict[str, Any]:
+        """兼容旧调用方，返回当前用于调度的额度窗口。"""
+        return OAuthAccountPool._dispatch_window(usage)

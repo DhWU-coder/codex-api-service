@@ -62,7 +62,9 @@ def usage_snapshot(remaining: float) -> dict[str, Any]:
             "windows": [
                 {
                     "kind": "primary",
+                    "label": "5h",
                     "remainingPercent": remaining,
+                    "limitWindowSeconds": 18_000,
                     "resetAt": 4_102_444_800,
                 }
             ],
@@ -229,6 +231,105 @@ async def test_refresh_account_keeps_existing_refresh_intervals(
     await pool.refresh_account(record.key)
 
     assert pool.runtimes[record.key].next_refresh_at == now + interval
+    await pool.close()
+
+
+def test_dispatch_window_prefers_five_hours_and_falls_back_to_shortest() -> None:
+    """验证调度按真实时长选择 5 小时窗口，而不是盲目选择 primary。"""
+    usage = usage_snapshot(80)
+    usage["rateLimit"]["windows"] = [
+        {
+            "kind": "primary",
+            "label": "Weekly",
+            "remainingPercent": 80,
+            "limitWindowSeconds": 604_800,
+            "resetAt": 4_102_444_800,
+        },
+        {
+            "kind": "secondary",
+            "label": "5h",
+            "remainingPercent": 40,
+            "limitWindowSeconds": 18_000,
+            "resetAt": 4_102_000_000,
+        },
+    ]
+
+    selected = OAuthAccountPool._dispatch_window(usage)
+
+    assert selected["label"] == "5h"
+    usage["rateLimit"]["windows"] = [
+        usage["rateLimit"]["windows"][0],
+        {
+            "kind": "secondary",
+            "label": "1d",
+            "remainingPercent": 60,
+            "limitWindowSeconds": 86_400,
+            "resetAt": 4_102_100_000,
+        },
+    ]
+    assert OAuthAccountPool._dispatch_window(usage)["label"] == "1d"
+
+
+@pytest.mark.asyncio
+async def test_refresh_account_uses_retry_backoff_and_keeps_last_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证额度读取失败后保留旧快照，并避免后台每五秒持续重试。"""
+    pool = OAuthAccountPool(
+        config=AppConfig(
+            project_root=tmp_path,
+            auth=AuthConfig(account_store_path=tmp_path / ".codex-oauth"),
+        )
+    )
+    record = await add_pool_account(pool, account_id="acct-retry")
+    previous_usage = usage_snapshot(50)
+    pool.runtimes[record.key].usage = previous_usage
+    now = 1_800_000_000.0
+
+    async def failing_fetch_usage(**_kwargs: Any) -> dict[str, Any]:
+        """模拟 app-server 额度接口暂时不可用。"""
+        raise RuntimeError("temporary failure")
+
+    monkeypatch.setattr(oauth_pool_module, "fetch_codex_usage_snapshot", failing_fetch_usage)
+    monkeypatch.setattr(oauth_pool_module.time, "time", lambda: now)
+
+    result = await pool.refresh_account(record.key)
+
+    assert result is None
+    assert pool.runtimes[record.key].usage is previous_usage
+    assert pool.runtimes[record.key].status == "available"
+    assert pool.runtimes[record.key].last_error == "额度读取失败"
+    assert pool.runtimes[record.key].next_refresh_at == now + 30
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_share_excludes_accounts_that_cannot_be_dispatched(tmp_path: Path) -> None:
+    """验证停用或限流账号不会占用预计调度占比分母。"""
+    pool = OAuthAccountPool(
+        config=AppConfig(
+            project_root=tmp_path,
+            auth=AuthConfig(account_store_path=tmp_path / ".codex-oauth"),
+        )
+    )
+    available = await add_pool_account(pool, account_id="acct-available")
+    disabled = await add_pool_account(pool, account_id="acct-disabled")
+    limited = await add_pool_account(pool, account_id="acct-limited")
+    await pool.store.update(disabled.key, enabled=False)
+    pool._rebuild_runtimes()
+    pool.runtimes[available.key].usage = usage_snapshot(50)
+    pool.runtimes[disabled.key].usage = usage_snapshot(50)
+    pool.runtimes[limited.key].usage = usage_snapshot(50)
+    pool.runtimes[limited.key].status = "rate_limited"
+
+    items = {item["key"]: item for item in pool.snapshot()["accounts"]}
+
+    assert items[available.key]["estimatedShare"] == pytest.approx(1.0)
+    assert items[disabled.key]["weight"] == 0.0
+    assert items[disabled.key]["estimatedShare"] == 0.0
+    assert items[limited.key]["weight"] == 0.0
+    assert items[limited.key]["estimatedShare"] == 0.0
     await pool.close()
 
 

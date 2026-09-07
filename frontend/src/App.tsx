@@ -527,8 +527,10 @@ function formatDisplayWeight(weight: number): string {
 }
 
 function primaryUsageWindow(account: OAuthAccountSnapshot) {
-  // 读取账号主 5 小时额度窗口。
-  return account.usage?.rateLimit.windows.find((item) => item.kind === "primary");
+  // 优先读取真实 5 小时窗口，没有时回退到最短有效窗口。
+  const windows = account.usage?.rateLimit.windows || [];
+  return windows.find((item) => item.limitWindowSeconds === 18000)
+    || windows.filter((item) => item.limitWindowSeconds > 0).sort((left, right) => left.limitWindowSeconds - right.limitWindowSeconds)[0];
 }
 
 function quotaTone(remainingPercent: number): "normal" | "warning" | "critical" {
@@ -1455,8 +1457,16 @@ export function App() {
             className={activeTab === "usage-status" ? "active" : ""}
             onClick={() => {
               setActiveTab("usage-status");
-              void loadCodexUsage();
-              void loadOAuthAccounts();
+              void (async () => {
+                const accounts = await fetchOAuthAccounts(apiKey).catch(() => null);
+                if (accounts) {
+                  setOauthAccounts(accounts);
+                  // 同步读取兼容接口，保留旧版控制台和已有集成的请求行为；多账号页面仍以账号快照为展示源。
+                  void loadCodexUsage();
+                } else {
+                  void loadCodexUsage();
+                }
+              })();
             }}
           >
             <Gauge size={18} />
@@ -2170,21 +2180,21 @@ export function App() {
                       <span><span className="metric-label">并发上限</span><strong>{account.maxConcurrency ?? "不限制"}</strong></span>
                       <span><span className="metric-label">权重</span><strong>{formatDisplayWeight(account.weight)}</strong></span>
                       <span><span className="metric-label">预计占比</span><strong>{Math.round(account.estimatedShare * 100)}%</strong></span>
-                      <span><span className="metric-label">5h 剩余</span><strong>{primaryWindow?.remainingPercent ?? "-"}%</strong></span>
-                      <span><span className="metric-label">5h 重置</span><strong>{formatResetTime(primaryWindow?.resetAt || 0)}</strong></span>
+                      <span><span className="metric-label">{primaryWindow?.label || "额度"} 剩余</span><strong>{primaryWindow?.remainingPercent ?? "-"}%</strong></span>
+                      <span><span className="metric-label">{primaryWindow?.label || "额度"} 重置</span><strong>{formatResetTime(primaryWindow?.resetAt || 0)}</strong></span>
                     </div>
                     {account.lastError ? <div className="field-error">{account.lastError}</div> : null}
                     <div className="oauth-account-footer">
                       {primaryWindow ? (
                         <div className="oauth-quota-visual">
                           <div className="oauth-quota-visual-head">
-                            <span>5h 剩余额度</span>
+                            <span>{primaryWindow.label} 剩余额度</span>
                             <strong>{primaryWindow.remainingPercent}%</strong>
                           </div>
                           <div
                             className={`oauth-quota-track ${quotaTone(primaryWindow.remainingPercent)}`}
                             role="progressbar"
-                            aria-label={`${account.alias} 5h 剩余额度`}
+                            aria-label={`${account.alias} ${primaryWindow.label} 剩余额度`}
                             aria-valuemin={0}
                             aria-valuemax={100}
                             aria-valuenow={primaryWindow.remainingPercent}
@@ -2286,7 +2296,7 @@ export function App() {
                           {formatPlanType(account.usage?.planType || "未知套餐")} · {account.enabled ? account.status : "已停用"}
                         </small>
                         <small className="account-load-quota">
-                          5h 剩余额度：{primaryWindow ? `${primaryWindow.remainingPercent}%` : "-"}
+                          {primaryWindow?.label || "额度"} 剩余额度：{primaryWindow ? `${primaryWindow.remainingPercent}%` : "-"}
                         </small>
                         <small className="account-load-reset">
                           重置：{primaryWindow ? formatResetTime(primaryWindow.resetAt) : "-"}

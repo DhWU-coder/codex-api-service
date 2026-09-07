@@ -245,24 +245,27 @@ def _rate_limit(value: Any) -> dict[str, Any]:
     """转换单组额度窗口。"""
     raw = value if isinstance(value, dict) else {}
     limit_reached = bool(raw.get("rateLimitReachedType"))
+    windows = [
+        _window(kind, item)
+        for kind, item in (("primary", raw.get("primary")), ("secondary", raw.get("secondary")))
+        if isinstance(item, dict)
+    ]
     return {
         "allowed": not limit_reached,
         "limitReached": limit_reached,
-        "windows": [
-            _window("5h", "primary", raw.get("primary")),
-            _window("Weekly", "secondary", raw.get("secondary")),
-        ],
+        "windows": windows,
     }
 
 
-def _window(label: str, kind: str, value: Any) -> dict[str, Any]:
-    """转换 5h 或 weekly 窗口，并限制百分比范围。"""
+def _window(kind: str, value: Any) -> dict[str, Any]:
+    """转换实际存在的额度窗口，并限制百分比范围。"""
     raw = value if isinstance(value, dict) else {}
     used_percent = _bounded_percent(raw.get("usedPercent"))
-    window_seconds = _integer(raw.get("windowDurationMins")) * 60
+    window_minutes = _integer(raw.get("windowDurationMins"))
+    window_seconds = window_minutes * 60
     reset_at = _integer(raw.get("resetsAt"))
     return {
-        "label": label,
+        "label": _window_label(window_minutes),
         "kind": kind,
         "usedPercent": used_percent,
         "remainingPercent": max(0, min(100, 100 - used_percent)),
@@ -270,6 +273,21 @@ def _window(label: str, kind: str, value: Any) -> dict[str, Any]:
         "resetAfterSeconds": max(0, reset_at - int(time.time())) if reset_at else 0,
         "resetAt": reset_at,
     }
+
+
+def _window_label(window_minutes: int) -> str:
+    """根据窗口分钟数生成不会误导用户的显示标签。"""
+    if window_minutes == 300:
+        return "5h"
+    if window_minutes == 10080:
+        return "Weekly"
+    if window_minutes > 0 and window_minutes % (24 * 60) == 0:
+        return f"{window_minutes // (24 * 60)}d"
+    if window_minutes > 0 and window_minutes % 60 == 0:
+        return f"{window_minutes // 60}h"
+    if window_minutes > 0:
+        return f"{window_minutes}m"
+    return "额度窗口"
 
 
 def _bounded_percent(value: Any) -> int:

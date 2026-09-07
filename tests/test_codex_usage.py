@@ -139,6 +139,64 @@ def test_summarize_codex_usage_keeps_limit_windows_and_removes_identity(monkeypa
     assert "user_secret" not in serialized
 
 
+def test_summarize_codex_usage_uses_actual_duration_and_omits_missing_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证只有周窗口的账号不会被误报为 5 小时加一个虚假满额窗口。"""
+    monkeypatch.setattr(codex_usage.time, "time", lambda: 1_783_813_768)
+    payload = raw_usage_payload()
+    weekly_only = {
+        "limitId": "codex",
+        "limitName": None,
+        "primary": {"usedPercent": 12, "windowDurationMins": 10080, "resetsAt": 1_789_057_153},
+        "secondary": None,
+        "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
+        "planType": "pro",
+        "rateLimitReachedType": None,
+    }
+    payload["rateLimits"] = weekly_only
+    payload["rateLimitsByLimitId"] = {"codex": weekly_only}
+
+    summary = summarize_codex_usage(payload)
+
+    assert summary["rateLimit"]["windows"] == [
+        {
+            "label": "Weekly",
+            "kind": "primary",
+            "usedPercent": 12,
+            "remainingPercent": 88,
+            "limitWindowSeconds": 604800,
+            "resetAfterSeconds": 5_243_385,
+            "resetAt": 1_789_057_153,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("duration_minutes", "expected_label"),
+    [(300, "5h"), (10080, "Weekly"), (1440, "1d"), (120, "2h"), (90, "90m"), (0, "额度窗口")],
+)
+def test_summarize_codex_usage_formats_other_window_durations(
+    duration_minutes: int,
+    expected_label: str,
+) -> None:
+    """验证未知窗口时长仍能生成可读且不误导的标签。"""
+    payload = raw_usage_payload()
+    primary = payload["rateLimits"]
+    assert isinstance(primary, dict)
+    primary["primary"] = {
+        "usedPercent": 10,
+        "windowDurationMins": duration_minutes,
+        "resetsAt": 1_789_057_153,
+    }
+    primary["secondary"] = None
+    payload["rateLimitsByLimitId"] = {}
+
+    summary = summarize_codex_usage(payload)
+
+    assert summary["rateLimit"]["windows"][0]["label"] == expected_label
+
+
 @pytest.mark.asyncio
 async def test_fetch_codex_usage_snapshot_reads_app_server_without_leaking_errors() -> None:
     """验证额度读取走 Codex app-server，错误信息不会透传内部细节。"""
