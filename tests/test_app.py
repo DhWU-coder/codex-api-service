@@ -202,6 +202,48 @@ class FailingCreateCodexClient:
         }
 
 
+class OverloadedCreateCodexClient(FailingCreateCodexClient):
+    """模拟非流式上游返回标准 503 overload 错误。"""
+
+    async def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """抛出包含 OpenAI type/code 的上游错误。"""
+        raise CodexHTTPStatusError(
+            503,
+            json.dumps(
+                {
+                    "error": {
+                        "message": "Our servers are currently overloaded. Please try again later.",
+                        "type": "service_unavailable_error",
+                        "code": "server_is_overloaded",
+                    }
+                }
+            ),
+        )
+
+
+class SemanticErrorStreamCodexClient(FailingStreamCodexClient):
+    """模拟 HTTP 200 SSE 中出现 error 语义事件。"""
+
+    async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        """返回标准 Responses error 事件。"""
+        yield {
+            "type": "error",
+            "error": {
+                "message": "Our servers are currently overloaded. Please try again later.",
+                "type": "service_unavailable_error",
+                "code": "server_is_overloaded",
+            },
+        }
+
+
+class IncompleteStreamCodexClient(FailingStreamCodexClient):
+    """模拟 SSE 只返回部分增量后提前结束。"""
+
+    async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        """返回没有 response.completed 的事件序列。"""
+        yield {"type": "response.output_text.delta", "delta": "partial"}
+
+
 class FakeModelCatalog:
     """为模型发现路由提供可控目录快照。"""
 
@@ -1304,3 +1346,67 @@ async def test_chat_non_stream_returns_json_error_when_codex_response_is_unexpec
     assert item["service_tier"] is None
     assert item["account_key"] == "account-a"
     assert item["account_alias"] == "owner@example.com"
+
+
+@pytest.mark.asyncio
+async def test_responses_non_stream_preserves_upstream_overload_error(tmp_path: Path) -> None:
+    """验证 Responses 非流式请求会返回上游 503 的 type 和 code。"""
+    app = create_app(config=make_test_config(tmp_path), codex_client=OverloadedCreateCodexClient())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.5", "input": "hello"},
+        )
+        requests = await client.get("/admin/requests")
+
+    assert response.status_code == 503
+    assert response.json()["error"] == {
+        "message": "Our servers are currently overloaded. Please try again later.",
+        "type": "service_unavailable_error",
+        "param": None,
+        "code": "server_is_overloaded",
+    }
+    item = requests.json()["items"][0]
+    assert item["path"] == "/v1/responses"
+    assert item["status_code"] == 503
+    assert "server_is_overloaded" in item["error"]
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_returns_sse_error_for_semantic_upstream_failure(tmp_path: Path) -> None:
+    """验证 Responses 流式 error 事件会被转换成可读的错误 SSE。"""
+    app = create_app(config=make_test_config(tmp_path), codex_client=SemanticErrorStreamCodexClient())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.5", "input": "hello", "stream": True},
+        )
+        requests = await client.get("/admin/requests")
+
+    assert response.status_code == 200
+    assert '"type":"service_unavailable_error"' in response.text
+    assert '"code":"server_is_overloaded"' in response.text
+    assert "Our servers are currently overloaded" in response.text
+    assert response.text.rstrip().endswith("data: [DONE]")
+    assert requests.json()["items"][0]["status_code"] == 503
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_returns_sse_error_when_completed_event_is_missing(tmp_path: Path) -> None:
+    """验证 Responses 流提前结束时不会只返回 data DONE 伪装成功。"""
+    app = create_app(config=make_test_config(tmp_path), codex_client=IncompleteStreamCodexClient())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.5", "input": "hello", "stream": True},
+        )
+        requests = await client.get("/admin/requests")
+
+    assert response.status_code == 200
+    assert '"status_code":502' in response.text
+    assert "response.completed" in response.text
+    assert response.text.rstrip().endswith("data: [DONE]")
+    assert requests.json()["items"][0]["status_code"] == 502

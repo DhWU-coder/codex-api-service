@@ -1,14 +1,18 @@
 import asyncio
+import json
+from collections.abc import AsyncIterator
 
 import pytest
 
 from codex_api_service.auth import CodexCredentials
 from codex_api_service.codex_client import (
     CodexClient,
+    CodexHTTPStatusError,
     CodexUnexpectedResponseError,
     _codex_headers,
     _non_sse_response_event,
     _sse_body_events,
+    codex_event_error,
 )
 from codex_api_service.config import CodexConfig
 
@@ -116,6 +120,165 @@ def test_non_sse_non_json_response_raises_readable_error() -> None:
     assert "HTTP 200" in message
     assert "text/html" in message
     assert "bad gateway" in message
+
+
+def test_non_sse_openai_error_preserves_type_and_code() -> None:
+    """验证 HTTP 200 携带 OpenAI error envelope 时不会伪装成 completed。"""
+    body = json.dumps(
+        {
+            "error": {
+                "message": "Our servers are currently overloaded. Please try again later.",
+                "type": "service_unavailable_error",
+                "code": "server_is_overloaded",
+            }
+        }
+    )
+
+    with pytest.raises(CodexHTTPStatusError) as caught:
+        _non_sse_response_event(status_code=200, content_type="application/json", body=body)
+
+    assert caught.value.status_code == 503
+    assert caught.value.error_type == "service_unavailable_error"
+    assert caught.value.error_code == "server_is_overloaded"
+    assert caught.value.error_message == "Our servers are currently overloaded. Please try again later."
+
+
+def test_response_failed_event_is_converted_to_upstream_error() -> None:
+    """验证 response.failed 事件中的嵌套错误字段可以被路由层使用。"""
+    error = codex_event_error(
+        {
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {
+                    "message": "模型暂时不可用",
+                    "type": "service_unavailable_error",
+                    "code": "server_is_overloaded",
+                },
+            },
+        }
+    )
+
+    assert error is not None
+    assert error.status_code == 503
+    assert error.error_type == "service_unavailable_error"
+    assert error.error_code == "server_is_overloaded"
+    assert error.error_message == "模型暂时不可用"
+
+
+def test_error_event_with_top_level_fields_infers_openai_error_type() -> None:
+    """验证 Responses error 事件使用顶层字段时仍能补齐 overload 类型。"""
+    error = codex_event_error(
+        {
+            "type": "error",
+            "message": "overloaded",
+            "code": "server_is_overloaded",
+        }
+    )
+
+    assert error is not None
+    assert error.status_code == 503
+    assert error.error_type == "service_unavailable_error"
+    assert error.error_code == "server_is_overloaded"
+
+
+@pytest.mark.asyncio
+async def test_create_response_does_not_fabricate_success_without_completed_event() -> None:
+    """验证没有 response.completed 时非流式聚合会返回协议错误。"""
+
+    class StaticAuth:
+        """提供固定有效凭据。"""
+
+        def ensure_credentials(self) -> CodexCredentials:
+            """返回测试凭据。"""
+            return CodexCredentials(access="access", refresh="refresh", expires=4_102_444_800_000)
+
+    class IncompleteClient(CodexClient):
+        """模拟只收到文本增量就结束的上游。"""
+
+        async def stream_response(self, _payload: dict) -> AsyncIterator[dict]:
+            """返回不完整的事件序列。"""
+            yield {"type": "response.output_text.delta", "delta": "partial"}
+
+    client = IncompleteClient(
+        auth=StaticAuth(),
+        config=CodexConfig(responses_url="https://example.test/codex"),
+    )
+
+    with pytest.raises(CodexUnexpectedResponseError) as caught:
+        await client.create_response({"model": "gpt-5.5"})
+
+    assert "response.completed" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_stream_response_raises_http_200_error_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证 SSE 的 HTTP 200 error 事件会在客户端层直接变成异常。"""
+
+    class StaticAuth:
+        """提供固定有效凭据。"""
+
+        def ensure_credentials(self) -> CodexCredentials:
+            """返回测试凭据。"""
+            return CodexCredentials(access="access", refresh="refresh", expires=4_102_444_800_000)
+
+    class FakeStreamResponse:
+        """提供最小 SSE 响应接口。"""
+
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def __aenter__(self) -> "FakeStreamResponse":
+            """进入响应上下文。"""
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            """退出响应上下文。"""
+            return None
+
+        async def aiter_lines(self):
+            """返回 HTTP 200 中携带的错误事件。"""
+            yield (
+                'data: {"type":"error","error":{"message":"overloaded",'
+                '"type":"service_unavailable_error","code":"server_is_overloaded"}}'
+            )
+
+    class FakeAsyncClient:
+        """返回固定的 SSE 错误响应。"""
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """忽略 httpx 客户端配置。"""
+            return None
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            """进入客户端上下文。"""
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            """退出客户端上下文。"""
+            return None
+
+        def stream(self, *_args: object, **_kwargs: object) -> FakeStreamResponse:
+            """返回固定响应。"""
+            return FakeStreamResponse()
+
+    monkeypatch.setattr("codex_api_service.codex_client.httpx.AsyncClient", FakeAsyncClient)
+    client = CodexClient(
+        auth=StaticAuth(),
+        config=CodexConfig(responses_url="https://example.test/codex"),
+    )
+
+    async def collect_events() -> list[dict]:
+        """收集一次请求的事件。"""
+        return [event async for event in client._stream_response_once({"model": "gpt-5.5"})]
+
+    with pytest.raises(CodexHTTPStatusError) as caught:
+        await collect_events()
+
+    assert caught.value.status_code == 503
+    assert caught.value.error_type == "service_unavailable_error"
+    assert caught.value.error_code == "server_is_overloaded"
+    assert caught.value.error_message == "overloaded"
 
 
 def test_sse_body_is_parsed_even_when_content_type_is_missing() -> None:

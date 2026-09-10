@@ -35,7 +35,13 @@ from .anthropic_compat import (
     codex_event_function_call,
 )
 from .auth import CodexAuth, credentials_expired_or_near
-from .codex_client import CodexClient, CodexHTTPStatusError, _codex_client_version
+from .codex_client import (
+    CodexClient,
+    CodexHTTPStatusError,
+    CodexUnexpectedResponseError,
+    _codex_client_version,
+    codex_event_error,
+)
 from .codex_usage import CodexUsageFetchError, fetch_codex_usage_snapshot
 from .config import AppConfig, load_config
 from .dashboard_summary import summarize_request_logs
@@ -112,12 +118,19 @@ def create_app(
         if isinstance(exc.detail, dict):
             message = str(exc.detail.get("message") or json.dumps(exc.detail, ensure_ascii=False))
             error_code = exc.detail.get("code") if isinstance(exc.detail.get("code"), str) else None
+            error_type = exc.detail.get("type") if isinstance(exc.detail.get("type"), str) else None
         else:
             message = str(exc.detail)
             error_code = None
+            error_type = None
         return JSONResponse(
             status_code=exc.status_code,
-            content=_openai_error_payload(message, exc.status_code, error_code=error_code),
+            content=_openai_error_payload(
+                message,
+                exc.status_code,
+                error_code=error_code,
+                error_type=error_type,
+            ),
         )
 
     @app.get("/health")
@@ -776,6 +789,9 @@ async def _stream_chat_completion(
     completed_response: dict[str, Any] | None = None
     try:
         async for event in client.stream_response(payload):
+            event_error = codex_event_error(event)
+            if event_error is not None:
+                raise event_error
             completed = codex_event_completed_response(event)
             if completed is not None:
                 completed_response = completed
@@ -835,11 +851,18 @@ async def _stream_chat_completion(
             delta = codex_event_text_delta(event)
             if delta is not None:
                 yield build_chat_delta_sse(response_id=response_id, model=model, delta=delta, created=created)
+        if completed_response is None:
+            raise CodexUnexpectedResponseError(
+                upstream_status_code=200,
+                content_type="text/event-stream",
+                body="SSE stream ended before response.completed",
+            )
     except Exception as error:
         # 流式响应已经开始后不能再改 HTTP 状态码，只能用 SSE error 事件优雅结束。
         message = _friendly_error_message(error)
         status_code = _error_status_code(error)
         error_code = _error_code(error)
+        error_type = _error_type(error)
         request_log.record(
             method="POST",
             path="/v1/chat/completions",
@@ -850,7 +873,12 @@ async def _stream_chat_completion(
             **request_metadata,
             **_request_account_log_fields(client),
         )
-        yield _stream_error_sse(message=message, status_code=status_code, error_code=error_code)
+        yield _stream_error_sse(
+            message=message,
+            status_code=status_code,
+            error_code=error_code,
+            error_type=error_type,
+        )
         yield "data: [DONE]\n\n"
         return
     if completed_response is not None:
@@ -886,15 +914,25 @@ async def _stream_response(
     completed_response: dict[str, Any] | None = None
     try:
         async for event in client.stream_response(payload):
+            event_error = codex_event_error(event)
+            if event_error is not None:
+                raise event_error
             completed = codex_event_completed_response(event)
             if completed is not None:
                 completed_response = completed
             yield response_stream_event(event)
+        if completed_response is None:
+            raise CodexUnexpectedResponseError(
+                upstream_status_code=200,
+                content_type="text/event-stream",
+                body="SSE stream ended before response.completed",
+            )
     except Exception as error:
         # Responses API 流也保持 SSE 完整结束，避免客户端看到网络层断流。
         message = _friendly_error_message(error)
         status_code = _error_status_code(error)
         error_code = _error_code(error)
+        error_type = _error_type(error)
         request_log.record(
             method="POST",
             path="/v1/responses",
@@ -905,7 +943,12 @@ async def _stream_response(
             **request_metadata,
             **_request_account_log_fields(client),
         )
-        yield _stream_error_sse(message=message, status_code=status_code, error_code=error_code)
+        yield _stream_error_sse(
+            message=message,
+            status_code=status_code,
+            error_code=error_code,
+            error_type=error_type,
+        )
         yield "data: [DONE]\n\n"
         return
     if completed_response is not None:
@@ -947,6 +990,9 @@ async def _stream_anthropic_message(
     yield anthropic_message_start_sse(message_id=message_id, model=model)
     try:
         async for event in client.stream_response(payload):
+            event_error = codex_event_error(event)
+            if event_error is not None:
+                raise event_error
             completed = codex_event_completed_response(event)
             if completed is not None:
                 completed_response = completed
@@ -971,9 +1017,16 @@ async def _stream_anthropic_message(
                     content_open = True
                     emitted_content = True
                 yield anthropic_text_delta_sse(delta, index=content_index)
+        if completed_response is None:
+            raise CodexUnexpectedResponseError(
+                upstream_status_code=200,
+                content_type="text/event-stream",
+                body="SSE stream ended before response.completed",
+            )
     except Exception as error:
         message = _friendly_error_message(error)
         status_code = _error_status_code(error)
+        error_type = _error_type(error)
         request_log.record(
             method="POST",
             path=path,
@@ -986,7 +1039,7 @@ async def _stream_anthropic_message(
         )
         if content_open:
             yield anthropic_content_block_stop_sse(index=content_index)
-        yield anthropic_error_sse(message=message)
+        yield anthropic_error_sse(message=message, error_type=error_type or "api_error")
         return
     if content_open:
         yield anthropic_content_block_stop_sse(index=content_index)
@@ -1062,6 +1115,7 @@ def _raise_non_stream_error(
     message = _friendly_error_message(error)
     status_code = _error_status_code(error)
     error_code = _error_code(error)
+    error_type = _error_type(error)
     request_log.record(
         method=method,
         path=path,
@@ -1074,16 +1128,30 @@ def _raise_non_stream_error(
     )
     raise HTTPException(
         status_code=status_code,
-        detail={"message": message, "code": error_code} if error_code else message,
+        detail={
+            key: value
+            for key, value in (
+                ("message", message),
+                ("type", error_type),
+                ("code", error_code),
+            )
+            if value is not None
+        },
     )
 
 
-def _openai_error_payload(message: str, status_code: int, *, error_code: str | None = None) -> dict[str, Any]:
+def _openai_error_payload(
+    message: str,
+    status_code: int,
+    *,
+    error_code: str | None = None,
+    error_type: str | None = None,
+) -> dict[str, Any]:
     """构造 OpenAI-compatible JSON 错误响应。"""
     return {
         "error": {
             "message": message,
-            "type": error_code or _openai_error_type(status_code),
+            "type": error_type or _openai_error_type(status_code),
             "param": None,
             "code": error_code,
         }
@@ -1094,6 +1162,8 @@ def _openai_error_type(status_code: int) -> str:
     """按 HTTP 状态码映射 OpenAI 常见错误类型。"""
     if status_code == 401:
         return "authentication_error"
+    if status_code == 503:
+        return "service_unavailable_error"
     if 400 <= status_code < 500:
         return "invalid_request_error"
     return "api_error"
@@ -1102,13 +1172,22 @@ def _openai_error_type(status_code: int) -> str:
 def _friendly_error_message(error: Exception) -> str:
     """把上游异常转换成前端可展示的短错误。"""
     if isinstance(error, CodexHTTPStatusError):
+        if isinstance(error.error_message, str) and error.error_message.strip():
+            return error.error_message.strip()
         try:
             body = json.loads(error.body)
-        except json.JSONDecodeError:
+        except (TypeError, json.JSONDecodeError):
             return str(error)
-        detail = body.get("detail")
-        if isinstance(detail, str) and detail.strip():
-            return detail.strip()
+        if isinstance(body, dict):
+            nested_error = body.get("error")
+            if isinstance(nested_error, dict):
+                message = nested_error.get("message")
+                if isinstance(message, str) and message.strip():
+                    return message.strip()
+            for key in ("detail", "message"):
+                message = body.get(key)
+                if isinstance(message, str) and message.strip():
+                    return message.strip()
     return str(error)
 
 
@@ -1127,10 +1206,29 @@ def _error_code(error: Exception) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _stream_error_sse(*, message: str, status_code: int, error_code: str | None = None) -> str:
+def _error_type(error: Exception) -> str | None:
+    """读取上游错误类型，供 OpenAI-compatible 响应和流式事件使用。"""
+    value = getattr(error, "error_type", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _stream_error_sse(
+    *,
+    message: str,
+    status_code: int,
+    error_code: str | None = None,
+    error_type: str | None = None,
+) -> str:
     """构造流式错误 SSE 事件。"""
     return encode_sse(
-        {"error": {"message": message, "status_code": status_code, **({"code": error_code} if error_code else {})}}
+        {
+            "error": {
+                "message": message,
+                "status_code": status_code,
+                "type": error_type or _openai_error_type(status_code),
+                **({"code": error_code} if error_code else {}),
+            }
+        }
     )
 
 

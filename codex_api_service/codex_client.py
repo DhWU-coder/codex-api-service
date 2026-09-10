@@ -24,11 +24,24 @@ RETRYABLE_HTTP_STATUS = {502, 503, 504}
 class CodexHTTPStatusError(RuntimeError):
     """携带 HTTP 状态码的 Codex 请求错误。"""
 
-    def __init__(self, status_code: int, body: str) -> None:
-        """保存状态码和响应体片段供重试判断与报错。"""
+    def __init__(
+        self,
+        status_code: int,
+        body: str,
+        *,
+        error_type: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """保存状态码、OpenAI 错误字段和响应体供重试判断与报错。"""
+        parsed_type, parsed_code, parsed_message = _error_fields_from_body(body)
         self.status_code = status_code
         self.body = body
-        super().__init__(f"Codex request failed: HTTP {status_code}: {body}")
+        self.error_type = error_type or parsed_type or _error_type_for_code(error_code or parsed_code)
+        self.error_code = error_code or parsed_code
+        self.error_message = error_message or parsed_message
+        detail = self.error_message or _body_snippet(body)
+        super().__init__(f"Codex request failed: HTTP {status_code}: {detail}")
 
 
 class CodexUnexpectedResponseError(RuntimeError):
@@ -63,6 +76,9 @@ class CodexClient:
         text_deltas: list[str] = []
         completed: dict[str, Any] | None = None
         async for event in self.stream_response(stream_payload):
+            event_error = codex_event_error(event)
+            if event_error is not None:
+                raise event_error
             if event.get("type") == "response.output_text.delta" and isinstance(event.get("delta"), str):
                 text_deltas.append(event["delta"])
             response = event.get("response")
@@ -74,7 +90,11 @@ class CodexClient:
             if "output_text" not in completed and text_deltas:
                 completed = {**completed, "output_text": "".join(text_deltas)}
             return completed
-        return {"id": "resp_local_aggregation", "output_text": "".join(text_deltas)}
+        raise CodexUnexpectedResponseError(
+            upstream_status_code=200,
+            content_type="text/event-stream",
+            body="SSE stream ended before response.completed",
+        )
 
     async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         """发送请求并逐个产出 Codex SSE JSON 事件。"""
@@ -135,6 +155,9 @@ class CodexClient:
                         if buffered_events:
                             # 某些上游响应漏掉 content-type，但 body 仍是标准 SSE 行。
                             for event in buffered_events:
+                                event_error = codex_event_error(event)
+                                if event_error is not None:
+                                    raise event_error
                                 yield event
                             return
                         yield _non_sse_response_event(
@@ -151,6 +174,9 @@ class CodexClient:
                         event = _parse_sse_line(line)
                         if event is None:
                             continue
+                        event_error = codex_event_error(event)
+                        if event_error is not None:
+                            raise event_error
                         yield event
                         if event.get("type") == "response.completed":
                             return
@@ -291,7 +317,125 @@ def _non_sse_response_event(*, status_code: int, content_type: str, body: str) -
             content_type=content_type,
             body=body,
         )
+    event_error = codex_event_error(parsed)
+    if event_error is not None:
+        raise event_error
+    error_payload = _nested_error_payload(parsed)
+    if error_payload is not None or parsed.get("status") == "failed":
+        raise _codex_error_from_payload(
+            error_payload or {},
+            body=body,
+            default_status_code=status_code if status_code >= 400 else None,
+            default_message="Codex backend response failed",
+        )
     return {"type": "response.completed", "response": parsed}
+
+
+def codex_event_error(event: dict[str, Any]) -> CodexHTTPStatusError | None:
+    """把 Responses 语义错误事件转换成可重试、可透传字段的异常。"""
+    event_type = event.get("type")
+    if event_type not in {"error", "response.failed"}:
+        return None
+
+    error_payload = event.get("error") if isinstance(event.get("error"), dict) else None
+    if error_payload is None and event_type == "response.failed":
+        response = event.get("response")
+        if isinstance(response, dict) and isinstance(response.get("error"), dict):
+            error_payload = response["error"]
+    if error_payload is None:
+        error_payload = {
+            key: event[key]
+            for key in ("message", "code", "param", "status_code")
+            if key in event
+        }
+        if isinstance(event.get("error_type"), str):
+            error_payload["type"] = event["error_type"]
+    return _codex_error_from_payload(
+        error_payload,
+        body=json.dumps({"error": error_payload}, ensure_ascii=False),
+        default_status_code=None,
+        default_message="Codex backend response failed",
+    )
+
+
+def _nested_error_payload(value: dict[str, Any]) -> dict[str, Any] | None:
+    """读取 OpenAI 错误 envelope 中的 error object。"""
+    error = value.get("error")
+    return error if isinstance(error, dict) else None
+
+
+def _codex_error_from_payload(
+    payload: dict[str, Any],
+    *,
+    body: str,
+    default_status_code: int | None,
+    default_message: str,
+) -> CodexHTTPStatusError:
+    """按 OpenAI 错误字段构造本地上游异常。"""
+    error_code = payload.get("code") if isinstance(payload.get("code"), str) else None
+    error_type = (
+        payload.get("type")
+        if isinstance(payload.get("type"), str)
+        else _error_type_for_code(error_code)
+    )
+    error_message = payload.get("message") if isinstance(payload.get("message"), str) else None
+    explicit_status = payload.get("status_code")
+    status_code = (
+        explicit_status
+        if isinstance(explicit_status, int) and 400 <= explicit_status < 600
+        else default_status_code
+    )
+    if status_code is None:
+        status_code = _status_code_for_error(error_type, error_code)
+    return CodexHTTPStatusError(
+        status_code,
+        body,
+        error_type=error_type,
+        error_code=error_code,
+        error_message=error_message or default_message,
+    )
+
+
+def _status_code_for_error(error_type: str | None, error_code: str | None) -> int:
+    """把 OpenAI 错误类型或错误码映射成兼容 HTTP 状态。"""
+    if error_type == "service_unavailable_error" or error_code == "server_is_overloaded":
+        return 503
+    if error_type == "rate_limit_error" or error_code in {"rate_limit_exceeded", "requests"}:
+        return 429
+    if error_type == "authentication_error":
+        return 401
+    if error_type == "permission_error":
+        return 403
+    if error_type == "invalid_request_error":
+        return 400
+    return 502
+
+
+def _error_type_for_code(error_code: str | None) -> str | None:
+    """按常见 OpenAI 错误码补齐缺失的错误类型。"""
+    if error_code == "server_is_overloaded":
+        return "service_unavailable_error"
+    if error_code in {"rate_limit_exceeded", "requests"}:
+        return "rate_limit_error"
+    return None
+
+
+def _error_fields_from_body(body: str) -> tuple[str | None, str | None, str | None]:
+    """从 JSON 错误响应体提取 type、code 和 message。"""
+    try:
+        parsed = json.loads(body)
+    except (TypeError, json.JSONDecodeError):
+        return None, None, None
+    if not isinstance(parsed, dict):
+        return None, None, None
+    error = parsed.get("error")
+    candidate = error if isinstance(error, dict) else parsed
+    error_type = candidate.get("type") if isinstance(candidate.get("type"), str) else None
+    error_code = candidate.get("code") if isinstance(candidate.get("code"), str) else None
+    message = candidate.get("message") if isinstance(candidate.get("message"), str) else None
+    if message is None and isinstance(parsed.get("detail"), str):
+        message = parsed["detail"]
+    return error_type, error_code, message
 
 
 def _body_snippet(body: str, limit: int = 500) -> str:
