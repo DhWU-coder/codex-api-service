@@ -74,6 +74,7 @@ class CodexClient:
         stream_payload = dict(payload)
         stream_payload["stream"] = True
         text_deltas: list[str] = []
+        output_items: dict[int, dict[str, Any]] = {}
         completed: dict[str, Any] | None = None
         async for event in self.stream_response(stream_payload):
             event_error = codex_event_error(event)
@@ -81,12 +82,21 @@ class CodexClient:
                 raise event_error
             if event.get("type") == "response.output_text.delta" and isinstance(event.get("delta"), str):
                 text_deltas.append(event["delta"])
+            if event.get("type") == "response.output_item.done" and isinstance(event.get("item"), dict):
+                # 完成事件可能不再重复 output，必须保留此前已完成的工具、推理和消息项。
+                index = event.get("output_index")
+                if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+                    # 兼容缺少索引的事件，按接收顺序补充，避免覆盖已有项。
+                    index = max(output_items, default=-1) + 1
+                output_items[index] = event["item"]
             response = event.get("response")
             if event.get("type") == "response.completed" and isinstance(response, dict):
                 completed = response
 
-        # completed 事件最完整；如果缺 output_text，则用已收到的 delta 补齐。
+        # 只在收到 completed 后补齐输出，避免把中途断流误报为成功。
         if completed is not None:
+            if not completed.get("output") and output_items:
+                completed = {**completed, "output": [output_items[index] for index in sorted(output_items)]}
             if "output_text" not in completed and text_deltas:
                 completed = {**completed, "output_text": "".join(text_deltas)}
             return completed

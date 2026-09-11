@@ -183,6 +183,68 @@ def test_error_event_with_top_level_fields_infers_openai_error_type() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_output", ["missing", "empty", "complete"])
+async def test_create_response_preserves_output_items_when_terminal_omits_them(terminal_output: str) -> None:
+    """验证真实聚合逻辑保留工具项、推理项和消息，兼容完成事件不重复携带输出。"""
+
+    class StaticAuth:
+        """禁止本地事件回放测试访问真实凭据。"""
+
+        def ensure_credentials(self) -> CodexCredentials:
+            """聚合测试不应触发认证。"""
+            raise AssertionError("本地回放不应访问上游")
+
+    output = [
+        {"id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "test_context"},
+        {
+            "id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "diagnostic_ping",
+            "arguments": '{"value":"pong"}', "status": "completed",
+        },
+        {
+            "id": "fc_2", "type": "function_call", "call_id": "call_2", "name": "diagnostic_ping",
+            "arguments": '{"value":"second"}', "status": "completed",
+        },
+        {
+            "id": "msg_1", "type": "message", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": "已调用", "annotations": []}],
+        },
+    ]
+    completed = {
+        "id": "resp_tool", "status": "completed",
+        "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+    }
+    if terminal_output == "empty":
+        completed["output"] = []
+    elif terminal_output == "complete":
+        completed["output"] = output
+
+    class ReplayClient(CodexClient):
+        """回放上游的输出项事件，保留生产环境非流式聚合实现。"""
+
+        async def stream_response(self, payload: dict) -> AsyncIterator[dict]:
+            """输出项按索引聚合，即使完成顺序不同或事件重复也不能丢失或重复。"""
+            assert payload["stream"] is True
+            yield {"type": "response.output_item.added", "output_index": 1, "item": {**output[1], "arguments": ""}}
+            yield {"type": "response.function_call_arguments.delta", "output_index": 1, "delta": '{"value":'}
+            for index in [0, 2, 1, 1, 3]:
+                yield {"type": "response.output_item.done", "output_index": index, "item": output[index]}
+            yield {"type": "response.completed", "response": completed}
+
+    client = ReplayClient(auth=StaticAuth(), config=CodexConfig())
+    result = await client.create_response({"model": "gpt-5.6-terra", "stream": False})
+
+    assert result["output"] == output
+    assert result["id"] == "resp_tool"
+    assert result["status"] == "completed"
+    assert result["usage"] == completed["usage"]
+    # 聚合不能修改上游完成事件，流式消费者仍可按原事件序列处理。
+    if terminal_output == "empty":
+        assert completed["output"] == []
+    elif terminal_output == "missing":
+        assert "output" not in completed
+
+
+@pytest.mark.asyncio
 async def test_create_response_does_not_fabricate_success_without_completed_event() -> None:
     """验证没有 response.completed 时非流式聚合会返回协议错误。"""
 

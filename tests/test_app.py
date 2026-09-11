@@ -7,8 +7,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from codex_api_service.app import create_app
-from codex_api_service.auth import CodexCredentials
-from codex_api_service.codex_client import CodexHTTPStatusError, CodexUnexpectedResponseError
+from codex_api_service.auth import CodexAuth, CodexCredentials
+from codex_api_service.codex_client import CodexClient, CodexHTTPStatusError, CodexUnexpectedResponseError
 from codex_api_service.config import (
     AppConfig,
     ApiConfig,
@@ -991,6 +991,45 @@ async def test_responses_forwards_function_tools_and_returns_calls(
         assert response.json()["usage"] == {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11}
     assert request_logs.json()["items"][0]["status_code"] == 200
     assert request_logs.json()["items"][0]["request_id"] == "resp_tool"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/v1/chat/completions"])
+async def test_non_stream_tool_calls_survive_real_sse_aggregation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """回放完成事件为空的工具流，验证真实客户端聚合与接口转换不会丢失调用。"""
+    event_client = ToolEventOnlyStreamCodexClient()
+    real_client = CodexClient(auth=CodexAuth(auth_path=tmp_path / "auth.json"), config=CodexConfig())
+    # 仅替换网络事件来源，让 create_response 使用生产环境的聚合逻辑。
+    monkeypatch.setattr(real_client, "stream_response", event_client.stream_response)
+    app = create_app(config=make_test_config(tmp_path), codex_client=real_client)
+    body = {
+        "model": "gpt-5.6-terra",
+        "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}],
+        "tool_choice": {"type": "function", "name": "get_weather"},
+    }
+    if path == "/v1/responses":
+        body["input"] = "查天气"
+    else:
+        body["messages"] = [{"role": "user", "content": "查天气"}]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(path, json=body)
+
+    assert response.status_code == 200
+    if path == "/v1/responses":
+        assert response.json()["output"] == [{
+            "type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": '{"city":"杭州"}'
+        }]
+        assert response.json()["output_text"] == ""
+    else:
+        choice = response.json()["choices"][0]
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["message"]["tool_calls"] == [{
+            "id": "call_1", "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"city":"杭州"}'},
+        }]
 
 
 @pytest.mark.asyncio
