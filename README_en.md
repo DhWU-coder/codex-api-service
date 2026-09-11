@@ -206,8 +206,19 @@ Unconfigured models use `reasoning_effort="medium"` with fast mode disabled. Req
 `reasoning_effort`, `reasoning.effort`, `fast_mode`, or `service_tier`.
 The service maps fast mode to the Codex OAuth backend value `service_tier="priority"`.
 
-The compatibility layer accepts common OpenAI SDK parameters, including `temperature`, `top_p`, `max_tokens`, `max_output_tokens`, `response_format`, `tools`, `tool_choice`, `stop`, `seed`, and penalty parameters.
-The current Codex OAuth backend does not support these sampling, tool, or format options, so the service ignores them locally to avoid upstream `Unsupported parameter` errors.
+The compatibility layer accepts common OpenAI SDK parameters, including `temperature`, `top_p`, `max_tokens`, `max_output_tokens`, `response_format`, `stop`, `seed`, and penalty parameters.
+The current Codex OAuth backend does not support these sampling or format options, so the service ignores them locally to avoid upstream `Unsupported parameter` errors.
+
+Both `/v1/chat/completions` and `/v1/responses` support function tools, `tool_choice`
+(`auto`, `required`, `none`, or a specific function), and boolean `parallel_tool_calls`.
+Responses accepts native flattened function definitions as well as Chat's nested `function` format.
+Chat returns `message.tool_calls` or streaming `delta.tool_calls` with `finish_reason="tool_calls"`.
+Responses preserves function calls, reasoning items, and messages in `output`; a tool-only response
+has empty `output_text`, so inspect `response.output` for `call_id`, `name`, and `arguments`.
+Streaming Responses forwards `response.output_item.*` and `response.function_call_arguments.*` events.
+The caller executes the function and submits a `function_call_output` with the matching `call_id`
+in the next request's `input`. When replaying history manually, retain the previous function calls
+and reasoning items as well.
 
 ```python
 from openai import OpenAI

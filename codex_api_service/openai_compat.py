@@ -31,14 +31,15 @@ def chat_messages_to_codex_input(messages: list[dict[str, Any]]) -> list[dict[st
 
 
 def openai_tools_to_codex_tools(tools: Any) -> list[dict[str, Any]]:
-    """把 OpenAI Chat function tools 转成 Responses function tools。"""
+    """把 OpenAI Chat 和 Responses 函数工具统一为 Responses 格式。"""
     if not isinstance(tools, list):
         return []
     codex_tools: list[dict[str, Any]] = []
     for tool in tools:
         if not isinstance(tool, dict) or tool.get("type") != "function":
             continue
-        function = tool.get("function")
+        # Chat 把函数定义嵌套在 function 中，Responses 则直接放在工具顶层。
+        function = tool.get("function", tool)
         if not isinstance(function, dict) or not isinstance(function.get("name"), str):
             continue
         codex_tool: dict[str, Any] = {
@@ -55,12 +56,12 @@ def openai_tools_to_codex_tools(tools: Any) -> list[dict[str, Any]]:
 
 
 def openai_tool_choice_to_codex_tool_choice(tool_choice: Any) -> Any:
-    """把 OpenAI Chat tool_choice 转成 Responses tool_choice。"""
+    """把 OpenAI Chat 和 Responses 函数选择统一为 Responses 格式。"""
     if isinstance(tool_choice, str):
         return tool_choice
     if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
         return None
-    function = tool_choice.get("function")
+    function = tool_choice.get("function", tool_choice)
     if not isinstance(function, dict) or not isinstance(function.get("name"), str):
         return None
     return {"type": "function", "name": function["name"]}
@@ -168,7 +169,7 @@ def build_response_object(codex_response: dict[str, Any], *, model: str) -> dict
         "created_at": _created_at(codex_response),
         "status": codex_response.get("status") or "completed",
         "model": model,
-        "output": _response_output(response_id, text),
+        "output": _response_output(response_id, text, codex_response.get("output")),
         "output_text": text,
         "usage": _responses_usage(codex_response.get("usage")),
     }
@@ -489,8 +490,13 @@ def _details_for(usage: dict[str, Any], primary_name: str, fallback_name: str, d
     return None
 
 
-def _response_output(response_id: str, text: str) -> list[dict[str, Any]]:
-    """构造 Responses API 的 output message。"""
+def _response_output(response_id: str, text: str, output: Any = None) -> list[dict[str, Any]]:
+    """保留上游输出项，仅在缺少结构化输出时用文本构造消息。"""
+    # 工具调用、推理项及其顺序都属于后续工具结果回传的上下文，不能压成纯文本。
+    if isinstance(output, list) and (output or not text):
+        return output
+    if not text:
+        return []
     return [
         {
             "id": f"msg_{response_id}",

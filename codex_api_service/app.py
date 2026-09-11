@@ -710,6 +710,15 @@ def _responses_body_to_codex_payload(body: dict[str, Any], config: AppConfig, mo
         raise HTTPException(status_code=400, detail="input is required")
     payload = _base_codex_payload(config, model, body)
     payload["input"] = normalize_responses_input(body["input"])
+    # Responses 原生函数定义与 Chat 嵌套格式共用转换逻辑，避免工具参数被遗漏。
+    tools = openai_tools_to_codex_tools(body.get("tools"))
+    if tools:
+        payload["tools"] = tools
+    tool_choice = openai_tool_choice_to_codex_tool_choice(body.get("tool_choice"))
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
+    if isinstance(body.get("parallel_tool_calls"), bool):
+        payload["parallel_tool_calls"] = body["parallel_tool_calls"]
     if isinstance(body.get("instructions"), str):
         payload["instructions"] = body["instructions"]
     if isinstance(body.get("previous_response_id"), str) and body["previous_response_id"]:

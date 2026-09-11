@@ -233,6 +233,15 @@ npm --prefix frontend run build
 非流式响应返回 `message.tool_calls`，流式响应返回 `delta.tool_calls` 并以
 `finish_reason="tool_calls"` 结束该轮。
 
+`/v1/responses` 同样支持 function tools：可直接传 Responses 原生的
+`{"type":"function","name":"...","parameters":{...}}`，也兼容 Chat 的嵌套 `function` 格式；
+`tool_choice` 支持 `auto`、`required`、`none` 和指定函数，两种接口均转发布尔型 `parallel_tool_calls`。
+非流式响应保留上游 `output` 中的 `function_call`、推理项和消息；纯工具调用时 `output_text` 为空，
+调用方应遍历 `response.output` 获取 `call_id`、`name` 和 `arguments`。
+流式响应转发 `response.output_item.*` 和 `response.function_call_arguments.*` 事件。
+函数由调用方执行，结果使用匹配 `call_id` 的 `function_call_output` 放入下一轮 `input`；
+手动回传历史时，应一并保留上一轮的工具调用和推理项。
+
 ```python
 from openai import OpenAI
 

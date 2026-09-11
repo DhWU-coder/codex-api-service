@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 import codex_api_service.openai_compat as openai_compat
 from codex_api_service.openai_compat import (
     build_chat_completion,
@@ -109,6 +111,12 @@ def test_openai_tool_choice_to_codex_tool_choice_flattens_forced_function() -> N
         "type": "function",
         "name": "Read",
     }
+
+
+@pytest.mark.parametrize("choice", ["auto", "required", "none", {"type": "function", "name": "Read"}])
+def test_openai_tool_choice_preserves_responses_function_choice(choice: object) -> None:
+    """验证 Responses 原生函数选择和字符串控制值不会被丢弃。"""
+    assert openai_compat.openai_tool_choice_to_codex_tool_choice(choice) == choice
 
 
 def test_normalize_responses_input_uses_assistant_output_text_blocks() -> None:
@@ -229,6 +237,62 @@ def test_build_response_object_keeps_responses_shape() -> None:
     assert response["model"] == "gpt-5.5"
     assert response["output_text"] == "hello"
     assert response["usage"] == {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+
+
+@pytest.mark.parametrize("include_context", [False, True])
+def test_build_response_object_preserves_function_calls_and_context(include_context: bool) -> None:
+    """验证纯工具调用及混合输出保留调用标识、参数、推理上下文和原始顺序。"""
+    output = [
+        {
+            "id": "fc_read_1",
+            "type": "function_call",
+            "call_id": "call_read_1",
+            "name": "Read",
+            "arguments": '{"file_path":"/tmp/demo"}',
+            "status": "completed",
+        },
+    ]
+    if include_context:
+        output.insert(0, {
+            "id": "rs_1",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "opaque_reasoning_context",
+        })
+        output.append({
+            "id": "fc_read_2",
+            "type": "function_call",
+            "call_id": "call_read_2",
+            "name": "Read",
+            "arguments": '{"file_path":"/tmp/another"}',
+            "status": "completed",
+        })
+        output.append({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "开始读取", "annotations": []}],
+        })
+
+    response = build_response_object({"id": "resp_tool", "output": output}, model="gpt-5.5")
+
+    assert response["output"] == output
+    assert response["output_text"] == ("开始读取" if include_context else "")
+
+
+@pytest.mark.parametrize("output", [None, []])
+@pytest.mark.parametrize("text", ["", "hello"])
+def test_build_response_object_only_falls_back_to_message_for_real_text(output: object, text: str) -> None:
+    """验证缺少输出项时仍兼容纯文本响应，但不会伪造空助手消息。"""
+    response = build_response_object({"output": output, "output_text": text}, model="gpt-5.5")
+
+    if text:
+        assert len(response["output"]) == 1
+        assert response["output"][0]["type"] == "message"
+        assert response["output"][0]["content"] == [{"type": "output_text", "text": text, "annotations": []}]
+    else:
+        assert response["output"] == []
 
 
 def test_build_chat_stream_events_emits_delta_usage_and_done() -> None:

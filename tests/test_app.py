@@ -178,6 +178,35 @@ class ToolEventOnlyStreamCodexClient(ToolStreamCodexClient):
         }
 
 
+class ResponsesToolStreamCodexClient(ToolStreamCodexClient):
+    """模拟包含调用开始、参数增量和完成事件的 Responses 工具流。"""
+
+    async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        """复用非流式工具响应，生成可供客户端按调用标识聚合的 SSE 事件。"""
+        response = await self.create_response(payload)
+        item = response["output"][0]
+        yield {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {**item, "arguments": "", "status": "in_progress"},
+        }
+        for delta in ['{"city":', '"杭州"}']:
+            yield {
+                "type": "response.function_call_arguments.delta",
+                "item_id": item["id"],
+                "output_index": 0,
+                "delta": delta,
+            }
+        yield {
+            "type": "response.function_call_arguments.done",
+            "item_id": item["id"],
+            "output_index": 0,
+            "arguments": item["arguments"],
+        }
+        yield {"type": "response.output_item.done", "output_index": 0, "item": item}
+        yield {"type": "response.completed", "response": response}
+
+
 class FailingCreateCodexClient:
     """模拟非流式聚合阶段收到不可解析的上游响应。"""
 
@@ -878,6 +907,132 @@ async def test_chat_completions_forwards_openai_tools_to_codex_payload(tmp_path:
     ]
     assert payload["tool_choice"] == {"type": "function", "name": "Read"}
     assert payload["parallel_tool_calls"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("chat_style", [False, True])
+async def test_responses_forwards_function_tools_and_returns_calls(
+    tmp_path: Path, stream: bool, chat_style: bool
+) -> None:
+    """验证两种函数格式均能传入上游，并在流式和非流式返回中保留完整调用。"""
+    fake_client = ResponsesToolStreamCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+    function = {
+        "name": "get_weather",
+        "description": "查询天气",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+    tool = {"type": "function", "function": function} if chat_style else {"type": "function", **function}
+    choice = (
+        {"type": "function", "function": {"name": "get_weather"}}
+        if chat_style else {"type": "function", "name": "get_weather"}
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.5",
+                "input": "杭州天气如何？",
+                "tools": [tool],
+                "tool_choice": choice,
+                "parallel_tool_calls": False,
+                "stream": stream,
+            },
+        )
+        request_logs = await client.get("/admin/requests")
+
+    assert response.status_code == 200
+    assert len(fake_client.payloads) == 1
+    payload = fake_client.payloads[0]
+    assert payload["tools"] == [{"type": "function", **function}]
+    assert payload["tool_choice"] == {"type": "function", "name": "get_weather"}
+    assert payload["parallel_tool_calls"] is False
+    expected_call = {
+        "id": "fc_1",
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "get_weather",
+        "arguments": '{"city":"杭州"}',
+        "status": "completed",
+    }
+    if stream:
+        assert "text/event-stream" in response.headers["content-type"]
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines() if line.startswith("data: {")
+        ]
+        assert [event["type"] for event in events] == [
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        assert events[0]["item"] == {**expected_call, "arguments": "", "status": "in_progress"}
+        assert events[1]["item_id"] == events[2]["item_id"] == "fc_1"
+        assert events[1]["output_index"] == events[2]["output_index"] == 0
+        assert events[1]["delta"] + events[2]["delta"] == expected_call["arguments"]
+        assert events[3]["arguments"] == expected_call["arguments"]
+        assert events[4]["item"] == expected_call
+        assert events[5]["response"]["output"] == [expected_call]
+        assert response.text.rstrip().endswith("data: [DONE]")
+    else:
+        assert response.json()["output"] == [expected_call]
+        assert response.json()["output_text"] == ""
+        assert response.json()["usage"] == {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11}
+    assert request_logs.json()["items"][0]["status_code"] == 200
+    assert request_logs.json()["items"][0]["request_id"] == "resp_tool"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_previous_response", [False, True])
+async def test_responses_preserves_tool_result_round_trip(tmp_path: Path, use_previous_response: bool) -> None:
+    """验证返回的调用和函数执行结果可作为下一轮 input 原样传给上游。"""
+    fake_client = ToolStreamCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+    tools = [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post("/v1/responses", json={"input": "查天气", "tools": tools})
+        assert first.status_code == 200
+        call = first.json()["output"][0]
+        assert call["type"] == "function_call"
+        tool_result = {"type": "function_call_output", "call_id": call["call_id"], "output": "晴，25°C"}
+        # 响应链模式只补工具结果；手动历史模式回传原消息、调用和结果。
+        history = [tool_result] if use_previous_response else [{"role": "user", "content": "查天气"}, call, tool_result]
+        continuation = {"previous_response_id": first.json()["id"]} if use_previous_response else {}
+        second = await client.post(
+            "/v1/responses",
+            json={
+                "input": history,
+                "tools": tools,
+                "tool_choice": "auto",
+                "parallel_tool_calls": True,
+                **continuation,
+            },
+        )
+
+    assert second.status_code == 200
+    if use_previous_response:
+        assert fake_client.payloads[1]["input"] == [tool_result]
+        assert fake_client.payloads[1]["previous_response_id"] == "resp_tool"
+    else:
+        assert fake_client.payloads[1]["input"] == [
+            {"role": "user", "content": [{"type": "input_text", "text": "查天气"}]}, call, tool_result
+        ]
+        assert "previous_response_id" not in fake_client.payloads[1]
+    assert fake_client.payloads[1]["tools"] == tools
+    assert fake_client.payloads[1]["tool_choice"] == "auto"
+    assert fake_client.payloads[1]["parallel_tool_calls"] is True
 
 
 @pytest.mark.asyncio
