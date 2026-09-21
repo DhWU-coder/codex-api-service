@@ -518,6 +518,78 @@ async def test_chat_completions_route_returns_openai_completion_and_logs_usage(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("image_only", [False, True])
+async def test_chat_completions_forwards_images_in_both_stream_modes(tmp_path: Path, stream: bool, image_only: bool) -> None:
+    """验证流式和非流式均转发多图、纯图片及图文混排，并且日志不记录图片内容。"""
+    fake_client = FakeCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+    content = [
+        {"type": "image_url", "image_url": {"url": "https://example.com/private-image.png?token=demo", "detail": "high"}},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8=", "detail": "auto"}},
+    ]
+    expected = [
+        {"type": "input_image", "image_url": "https://example.com/private-image.png?token=demo", "detail": "high"},
+        {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8=", "detail": "auto"},
+    ]
+    if not image_only:
+        content.insert(1, {"type": "text", "text": "请对比图片"})
+        expected.insert(1, {"type": "input_text", "text": "请对比图片"})
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/v1/chat/completions", json={
+            "model": "gpt-5.5", "stream": stream, "messages": [{"role": "user", "content": content}],
+        })
+
+    assert response.status_code == 200
+    assert len(fake_client.payloads) == 1
+    assert fake_client.payloads[0]["input"] == [{"role": "user", "content": expected}]
+    if stream:
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert "data: [DONE]" in response.text
+    else:
+        assert response.json()["choices"][0]["message"]["content"] == "hello"
+    logs = (tmp_path / "logs" / "requests.jsonl").read_text(encoding="utf-8")
+    assert "private-image" not in logs
+    assert "aGVsbG8=" not in logs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("image_url", [
+    None, "https://example.com/private-image.png", [], {}, {"url": None}, {"url": 123},
+    {"url": ""}, {"url": "   "},
+    {"url": "https://example.com/private-image.png", "detail": "invalid"},
+    {"url": "data:image/png;base64,aGVsbG8=", "detail": []},
+    {"url": "https://example.com/private-image.png", "detail": None},
+])
+async def test_chat_completions_rejects_invalid_images_before_upstream(tmp_path: Path, stream: bool, image_url: Any) -> None:
+    """验证错误图片参数在建立流之前返回 400，不调用上游，也不回显图片地址。"""
+    fake_client = FakeCodexClient()
+    app = create_app(config=make_test_config(tmp_path), codex_client=fake_client)
+    image_part = {"type": "image_url", "image_url": image_url}
+    if image_url is None:
+        # 缺失整个 image_url 字段也必须被明确拒绝。
+        image_part.pop("image_url")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/v1/chat/completions", json={
+            "model": "gpt-5.5", "stream": stream, "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "不要丢弃图片后只发送文字"}, image_part,
+            ]}],
+        })
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert response.json()["error"]["code"] == "invalid_image"
+    assert "image_url" in response.json()["error"]["message"]
+    assert "private-image" not in response.text
+    assert "aGVsbG8=" not in response.text
+    assert fake_client.payloads == []
+
+
+@pytest.mark.asyncio
 async def test_chat_completions_route_returns_non_stream_tool_calls(tmp_path: Path) -> None:
     """验证非流式 Chat 路由返回标准 OpenAI tool_calls。"""
     fake_client = ToolStreamCodexClient()

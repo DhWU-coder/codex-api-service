@@ -8,6 +8,10 @@ import uuid
 from typing import Any, Iterable, Iterator
 
 
+class InvalidChatImageError(ValueError):
+    """表示 Chat 图片参数无效，供路由在建立响应流之前返回明确错误。"""
+
+
 def chat_messages_to_codex_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """把 Chat Completions messages 转成 Codex Responses input。"""
     codex_messages: list[dict[str, Any]] = []
@@ -22,7 +26,7 @@ def chat_messages_to_codex_input(messages: list[dict[str, Any]]) -> list[dict[st
         # Codex backend 接受 user/system/developer 这类 Responses input role。
         content = message.get("content")
         if content is not None:
-            blocks = _content_to_text_blocks(content, role=role)
+            blocks = _chat_content_to_codex_blocks(content, role=role)
             if blocks:
                 codex_messages.append({"role": role, "content": blocks})
         if role == "assistant":
@@ -387,12 +391,12 @@ def _json_text(value: Any) -> str:
 
 
 def _content_to_input_blocks(content: Any) -> list[dict[str, Any]]:
-    """把 OpenAI message content 转成 input_text blocks。"""
-    return _content_to_text_blocks(content, role="user")
+    """把 OpenAI 用户消息内容转成 Responses 图文块。"""
+    return _chat_content_to_codex_blocks(content, role="user")
 
 
-def _content_to_text_blocks(content: Any, *, role: str) -> list[dict[str, Any]]:
-    """按 role 把 OpenAI message content 转成 Responses text blocks。"""
+def _chat_content_to_codex_blocks(content: Any, *, role: str) -> list[dict[str, Any]]:
+    """按角色转换文本，同时保留 Chat 图片及图文混排顺序。"""
     block_type = _text_block_type_for_role(role)
     if isinstance(content, str):
         return [{"type": block_type, "text": content}]
@@ -400,6 +404,10 @@ def _content_to_text_blocks(content: Any, *, role: str) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
         for part in content:
             if not isinstance(part, dict):
+                continue
+            if part.get("type") == "image_url":
+                # 图片必须单独转换，不能因为没有 text 字段而被静默丢弃。
+                blocks.append(_chat_image_to_codex_block(part))
                 continue
             text = part.get("text")
             if isinstance(text, str):
@@ -410,6 +418,26 @@ def _content_to_text_blocks(content: Any, *, role: str) -> list[dict[str, Any]]:
                     blocks.append({"type": block_type, "text": text})
         return blocks
     return [{"type": block_type, "text": str(content)}]
+
+
+def _chat_image_to_codex_block(part: dict[str, Any]) -> dict[str, Any]:
+    """把 Chat 嵌套图片字段转换为 Responses input_image，并校验参数结构。"""
+    image = part.get("image_url")
+    if not isinstance(image, dict):
+        raise InvalidChatImageError("image_url 必须是包含 url 字段的对象")
+    url = image.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise InvalidChatImageError("image_url.url 必须为非空字符串（图片 URL 或 Base64 Data URL）")
+
+    # 原样转发地址及 Base64，不在代理内下载、解码图片，也不把图片内容写入错误消息。
+    block: dict[str, Any] = {"type": "input_image", "image_url": url}
+    if "detail" in image:
+        detail = image["detail"]
+        if not isinstance(detail, str) or detail not in {"auto", "low", "high", "original"}:
+            raise InvalidChatImageError("image_url.detail 必须为 auto、low、high 或 original")
+        # 仅保留显式清晰度；具体模型是否支持该清晰度由上游判断。
+        block["detail"] = detail
+    return block
 
 
 def _normalize_response_input_item(item: Any) -> Any:

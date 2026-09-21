@@ -1,3 +1,4 @@
+import copy
 import json
 
 import pytest
@@ -31,6 +32,63 @@ def test_chat_messages_to_codex_input_uses_role_specific_text_block_types() -> N
         {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
         {"role": "assistant", "content": [{"type": "output_text", "text": "hi"}]},
     ]
+
+
+@pytest.mark.parametrize("url", ["https://example.com/image.png?token=demo", "http://example.com/image.jpg", "data:image/png;base64,aGVsbG8="])
+@pytest.mark.parametrize("detail", [None, "auto", "low", "high", "original"])
+def test_chat_messages_to_codex_input_preserves_image_url_and_detail(url: str, detail: str | None) -> None:
+    """验证纯图片消息保留完整 URL、Base64 和显式清晰度，不修改原始输入。"""
+    image_url = {"url": url}
+    expected = {"type": "input_image", "image_url": url}
+    if detail is not None:
+        image_url["detail"] = detail
+        expected["detail"] = detail
+    messages = [{"role": "user", "content": [{"type": "image_url", "image_url": image_url}]}]
+    original = copy.deepcopy(messages)
+
+    assert chat_messages_to_codex_input(messages) == [{"role": "user", "content": [expected]}]
+    assert messages == original
+
+
+def test_chat_messages_to_codex_input_preserves_interleaved_images_and_text() -> None:
+    """验证多图与文字保持原顺序，历史文本和工具调用不受影响。"""
+    messages = [
+        {"role": "system", "content": "分析图片"},
+        {"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "https://example.com/first.png", "detail": "high"}},
+            {"type": "text", "text": "对比两张图片"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
+            {"type": "text", "text": "有哪些不同？"},
+        ]},
+        {"role": "assistant", "content": "我来检查", "tool_calls": [
+            {"id": "call_image", "type": "function", "function": {"name": "inspect", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "call_image", "content": "检查完成"},
+    ]
+
+    assert chat_messages_to_codex_input(messages) == [
+        {"role": "system", "content": [{"type": "input_text", "text": "分析图片"}]},
+        {"role": "user", "content": [
+            {"type": "input_image", "image_url": "https://example.com/first.png", "detail": "high"},
+            {"type": "input_text", "text": "对比两张图片"},
+            {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+            {"type": "input_text", "text": "有哪些不同？"},
+        ]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "我来检查"}]},
+        {"type": "function_call", "call_id": "call_image", "name": "inspect", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_image", "output": "检查完成"},
+    ]
+
+
+def test_normalize_responses_input_preserves_native_image_blocks() -> None:
+    """验证修复 Chat 转换时不会改变 Responses 原生图片结构。"""
+    messages = [{"role": "user", "content": [
+        {"type": "input_text", "text": "对比图片"},
+        {"type": "input_image", "image_url": "https://example.com/image.png", "detail": "original"},
+        {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+    ]}]
+
+    assert normalize_responses_input(messages) == messages
 
 
 def test_chat_messages_to_codex_input_preserves_tool_call_history() -> None:

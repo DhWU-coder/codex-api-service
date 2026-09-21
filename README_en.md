@@ -217,6 +217,15 @@ The service maps fast mode to the Codex OAuth backend value `service_tier="prior
 The compatibility layer accepts common OpenAI SDK parameters, including `temperature`, `top_p`, `max_tokens`, `max_output_tokens`, `response_format`, `stop`, `seed`, and penalty parameters.
 The current Codex OAuth backend does not support these sampling or format options, so the service ignores them locally to avoid upstream `Unsupported parameter` errors.
 
+`/v1/chat/completions` accepts images in a user message's `content` array, without a separate image endpoint:
+`{"type":"image_url","image_url":{"url":"https://example.com/image.png","detail":"high"}}`.
+The URL can be an image URL or a Base64 data URL such as `data:image/png;base64,...`.
+Text and images retain their order; multiple images and image-only messages work in both streaming and non-streaming requests.
+The proxy converts images to Responses `input_image` blocks and preserves the URL and explicit `detail`.
+Allowed detail values are `auto`, `low`, `high`, and `original` (model support varies); omitted values use the upstream default.
+Malformed image parameters return HTTP 400 (`invalid_request_error` / `invalid_image`) before calling upstream, instead of silently dropping the image.
+The upstream validates image contents and URL accessibility; the proxy does not download or decode images.
+
 Both `/v1/chat/completions` and `/v1/responses` support function tools, `tool_choice`
 (`auto`, `required`, `none`, or a specific function), and boolean `parallel_tool_calls`.
 Responses accepts native flattened function definitions as well as Chat's nested `function` format.

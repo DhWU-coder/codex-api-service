@@ -54,6 +54,7 @@ from .model_catalog import (
     model_list_response,
 )
 from .openai_compat import (
+    InvalidChatImageError,
     build_chat_completion,
     build_chat_delta_sse,
     build_chat_finish_sse,
@@ -692,7 +693,14 @@ def _chat_body_to_codex_payload(body: dict[str, Any], config: AppConfig, model: 
     if not isinstance(messages, list):
         raise HTTPException(status_code=400, detail="messages must be a list")
     payload = _base_codex_payload(config, model, body)
-    payload["input"] = chat_messages_to_codex_input(messages)
+    try:
+        payload["input"] = chat_messages_to_codex_input(messages)
+    except InvalidChatImageError as exc:
+        # 在创建 StreamingResponse 之前校验，确保流式调用也能收到 HTTP 400。
+        raise HTTPException(
+            status_code=400,
+            detail={"message": str(exc), "type": "invalid_request_error", "code": "invalid_image"},
+        ) from exc
     tools = openai_tools_to_codex_tools(body.get("tools"))
     if tools:
         payload["tools"] = tools

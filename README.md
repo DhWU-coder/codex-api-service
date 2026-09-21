@@ -233,6 +233,15 @@ npm --prefix frontend run build
 `max_output_tokens`、`response_format`、`stop`、`seed` 和 penalty 等 Codex OAuth backend
 当前不支持的采样或格式参数会在本地忽略，避免上游返回 `Unsupported parameter`。
 
+`/v1/chat/completions` 支持在用户消息的 `content` 数组中传图片，无需单独的图片接口：
+`{"type":"image_url","image_url":{"url":"https://example.com/image.png","detail":"high"}}`。
+`url` 可以是图片 URL 或 `data:image/png;base64,...` 等 Base64 Data URL；
+可与 `{"type":"text","text":"请描述图片"}` 混排，也支持多图和纯图片消息。
+代理按原顺序转换为 Responses `input_image`，保留图片地址及显式 `detail`，流式与非流式一致。
+`detail` 支持 `auto`、`low`、`high`、`original`（实际可用值取决于模型）；省略时使用上游默认值。
+图片参数结构错误会在调用上游前返回 HTTP 400（`invalid_request_error` / `invalid_image`），不会丢弃图片后继续请求。
+图片内容有效性与远程地址可访问性由上游校验，代理不会下载或解码图片。
+
 `/v1/chat/completions` 支持 function tools：`tools`、`tool_choice` 和布尔型
 `parallel_tool_calls` 会转换成 Codex Responses payload；历史 assistant `tool_calls` 与
 `role="tool"` 消息会转换成 `function_call` 和 `function_call_output`。模型调用工具时，
