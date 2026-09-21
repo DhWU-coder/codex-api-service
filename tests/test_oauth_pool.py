@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -6,10 +7,11 @@ import pytest
 
 from codex_api_service.codex_client import CodexHTTPStatusError
 import codex_api_service.oauth_pool as oauth_pool_module
-from codex_api_service.auth import CodexCredentials
+from codex_api_service.auth import CodexAuth, CodexCredentials, OAuthLoginRequired
 from codex_api_service.config import AppConfig, AuthConfig
 from codex_api_service.oauth_accounts import OAuthAccountRecord
 from codex_api_service.oauth_pool import AccountRuntime, OAuthAccountPool
+from codex_api_service.oauth_scheduler import BoundAccountUnavailable, NoAvailableOAuthAccounts
 
 
 class SuccessfulAccountClient:
@@ -51,6 +53,33 @@ class FakeUsageSession:
     async def close(self) -> None:
         """记录会话被账号池关闭。"""
         self.close_count += 1
+
+
+class AuthResultClient(SuccessfulAccountClient):
+    """记录请求次数，并按需在首个事件前后抛出认证错误。"""
+
+    def __init__(self, error: Exception | None = None, *, emit_first: bool = False) -> None:
+        """保存本地测试结果，不触及真实 OAuth 服务。"""
+        self.error = error
+        self.emit_first = emit_first
+        self.calls = 0
+
+    async def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """让非流式测试观察是否真正尝试了健康账号。"""
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return await super().create_response(payload)
+
+    async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        """首个事件前可切换账号，事件发出后必须直接报错。"""
+        self.calls += 1
+        if self.emit_first:
+            yield {"type": "response.output_text.delta", "delta": "partial"}
+        if self.error:
+            raise self.error
+        async for event in super().stream_response(payload):
+            yield event
 
 
 def usage_snapshot(remaining: float) -> dict[str, Any]:
@@ -107,6 +136,11 @@ def make_account_pool(tmp_path: Path, client: SuccessfulAccountClient) -> OAuthA
         alias="owner@example.com",
         source="test",
     )
+    # 模拟已注册且拥有独立凭据的账号，避免测试跳过真实的入池检查。
+    pool.store._records[record.key] = record
+    CodexAuth(auth_path=pool.store.auth_path(record.key)).save(
+        CodexCredentials("test-access", "test-refresh", 4_102_444_800_000, "test-account")
+    )
     pool.runtimes[record.key] = AccountRuntime(record=record, client=client)  # type: ignore[arg-type]
     pool._update_scheduler()
     pool._initialized = True
@@ -157,6 +191,229 @@ async def test_failed_response_keeps_last_attempted_account_metadata(tmp_path: P
             "account_alias": "owner@example.com",
         }
     finally:
+        await pool.close()
+
+
+async def add_healthy_fallback(pool: OAuthAccountPool) -> tuple[OAuthAccountRecord, AuthResultClient]:
+    """增加健康账号并固定首选失效账号，确保回退测试不依赖随机时间权重。"""
+    record = await add_pool_account(pool, "healthy")
+    client = AuthResultClient()
+    pool.runtimes[record.key].client = client
+    pool.scheduler._smooth_current["account-a"] = 100
+    return record, client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("error_status", [None, 401, 403])
+async def test_auth_failure_is_quarantined_and_request_uses_healthy_account(
+    tmp_path: Path, stream: bool, error_status: int | None
+) -> None:
+    """验证本地登录失败和上游认证错误都会隔离账号，并在未输出时自动回退。"""
+    error = OAuthLoginRequired("requires login") if error_status is None else CodexHTTPStatusError(error_status, "denied")
+    broken = AuthResultClient(error)
+    pool = make_account_pool(tmp_path, broken)
+    healthy_record, healthy = await add_healthy_fallback(pool)
+    try:
+        if stream:
+            events = [event async for event in pool.stream_response({"model": "test"})]
+            assert events[-1]["type"] == "response.completed"
+        else:
+            assert (await pool.create_response({"model": "test"}))["output_text"] == "ok"
+        assert broken.calls == healthy.calls == 1
+        assert pool.runtimes["account-a"].status == "login_required"
+        assert "account-a" not in pool._available_keys()
+        assert pool.request_account_metadata()["account_key"] == healthy_record.key
+        item = next(item for item in pool.snapshot()["accounts"] if item["key"] == "account-a")
+        assert item["enabled"] is True
+        assert item["weight"] == item["estimatedShare"] == 0
+        assert "重新登录" in item["lastError"]
+        await pool.create_response({"model": "test"})
+        assert broken.calls == 1
+        assert pool.scheduler.active_snapshot()[0] == 0
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_bound_auth_failure_marks_account_but_never_switches(tmp_path: Path, stream: bool) -> None:
+    """验证绑定会话首次发现认证失效时也隔离账号，并明确返回 409。"""
+    broken = AuthResultClient(OAuthLoginRequired("requires login"))
+    pool = make_account_pool(tmp_path, broken)
+    _, healthy = await add_healthy_fallback(pool)
+    pool.bindings.bind("resp_bound", "account-a")
+    try:
+        with pytest.raises(BoundAccountUnavailable) as caught:
+            if stream:
+                _ = [event async for event in pool.stream_response({"previous_response_id": "resp_bound"})]
+            else:
+                await pool.create_response({"previous_response_id": "resp_bound"})
+        assert caught.value.status_code == 409
+        assert healthy.calls == 0
+        assert pool.runtimes["account-a"].status == "login_required"
+        assert pool.scheduler.active_snapshot()[0] == 0
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("http_error", [False, True])
+async def test_auth_failure_after_stream_output_never_switches(tmp_path: Path, http_error: bool) -> None:
+    """验证流式已输出时只终止本次请求，但仍禁止失效账号继续参与后续轮换。"""
+    error = CodexHTTPStatusError(401, "denied") if http_error else OAuthLoginRequired("requires login")
+    pool = make_account_pool(tmp_path, AuthResultClient(error, emit_first=True))
+    _, healthy = await add_healthy_fallback(pool)
+    try:
+        stream = pool.stream_response({"model": "test"})
+        assert (await anext(stream))["delta"] == "partial"
+        with pytest.raises(type(error)):
+            await anext(stream)
+        assert healthy.calls == 0
+        assert pool.runtimes["account-a"].status == "login_required"
+        assert pool.scheduler.active_snapshot()[0] == 0
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_all_accounts_require_login_returns_503_without_leaking_slots(tmp_path: Path, stream: bool) -> None:
+    """验证没有健康账号时及时返回明确的服务不可用错误，并释放并发槽。"""
+    broken = AuthResultClient(OAuthLoginRequired("requires login"))
+    pool = make_account_pool(tmp_path, broken)
+    try:
+        for _ in range(2):
+            with pytest.raises(NoAvailableOAuthAccounts) as caught:
+                if stream:
+                    _ = [event async for event in pool.stream_response({"model": "test"})]
+                else:
+                    await pool.create_response({"model": "test"})
+            assert caught.value.status_code == 503
+            assert caught.value.error_code == "oauth_accounts_unavailable"
+        assert broken.calls == 1
+        assert pool.scheduler.active_snapshot()[0] == 0
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", [True, False])
+async def test_missing_or_invalid_credentials_never_enter_rotation(tmp_path: Path, missing: bool) -> None:
+    """验证注册表中的账号在凭据丢失或格式无效时，首次请求之前就退出调度。"""
+    pool = make_account_pool(tmp_path, AuthResultClient())
+    path = pool.store.auth_path("account-a")
+    if missing:
+        path.unlink()
+    else:
+        path.write_text("[]", encoding="utf-8")
+    try:
+        snapshot = pool.snapshot()
+        assert snapshot["accounts"][0]["status"] == "login_required"
+        assert snapshot["accounts"][0]["weight"] == 0
+        assert pool._available_keys() == set()
+        with pytest.raises(NoAvailableOAuthAccounts):
+            await pool.create_response({"model": "test"})
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_only_recovers_after_credentials_change(tmp_path: Path) -> None:
+    """验证重复同步旧令牌或修改别名不会解封，新的未过期凭据可恢复同一账号。"""
+    pool = make_account_pool(tmp_path, AuthResultClient(OAuthLoginRequired("requires login")))
+    auth = CodexAuth(auth_path=pool.store.auth_path("account-a"))
+    old_credentials = auth.load()
+    try:
+        with pytest.raises(NoAvailableOAuthAccounts):
+            await pool.create_response({"model": "test"})
+        # 模拟失效凭据被清除后，全局同步又写回同一份旧文件。
+        pool.store.auth_path("account-a").unlink()
+        pool._rebuild_runtimes()
+        auth.save(old_credentials)
+        await pool.store.update("account-a", alias="新别名")
+        pool._rebuild_runtimes()
+        assert pool.runtimes["account-a"].status == "login_required"
+        assert pool.runtimes["account-a"].last_error
+        # 重启读取同一份注册表和认证文件，也不能重新启用已被拒绝的旧令牌。
+        restarted = OAuthAccountPool(config=pool.config)
+        try:
+            restarted._rebuild_runtimes()
+            assert restarted.runtimes["account-a"].status == "login_required"
+            assert "account-a" not in restarted._available_keys()
+        finally:
+            await restarted.close()
+        # 新文件如果仍已过期，也不能被当作一次成功的重新登录。
+        auth.save(CodexCredentials("new-expired", "new-refresh", 1, "test-account"))
+        pool._rebuild_runtimes()
+        assert pool.runtimes["account-a"].status == "login_required"
+        auth.save(CodexCredentials("new-access", "new-refresh", 4_102_444_800_000, "test-account"))
+        pool._rebuild_runtimes()
+        assert pool.runtimes["account-a"].status == "available"
+        assert pool.runtimes["account-a"].last_error is None
+        assert pool.runtimes["account-a"].next_refresh_at == 0
+        assert "account-a" in pool._available_keys()
+        restarted = OAuthAccountPool(config=pool.config)
+        try:
+            restarted._rebuild_runtimes()
+            assert restarted.runtimes["account-a"].status == "available"
+        finally:
+            await restarted.close()
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_account_does_not_poll_stale_usage_session(tmp_path: Path) -> None:
+    """验证失效账号关闭旧额度会话，不会被该会话缓存的成功结果重新放入池中。"""
+    pool = make_account_pool(tmp_path, AuthResultClient(OAuthLoginRequired("requires login")))
+    session = FakeUsageSession(usage_snapshot(50))
+    pool._usage_sessions["account-a"] = session
+    try:
+        with pytest.raises(NoAvailableOAuthAccounts):
+            await pool.create_response({"model": "test"})
+        assert await pool.refresh_account("account-a") is None
+        assert session.read_count == 0
+        assert session.close_count == 1
+        assert "account-a" not in pool._usage_sessions
+        assert pool.runtimes["account-a"].status == "login_required"
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage_fails", [False, True])
+async def test_inflight_quota_refresh_cannot_overwrite_auth_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, usage_fails: bool
+) -> None:
+    """验证认证失败发生在额度请求期间时，迟到的成功或失败结果都不能覆盖认证状态。"""
+    pool = make_account_pool(tmp_path, AuthResultClient(OAuthLoginRequired("requires login")))
+    pool._rebuild_runtimes()
+    pool._usage_sessions["account-a"] = FakeUsageSession(usage_snapshot(50))
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def delayed_usage(**_kwargs: Any) -> dict[str, Any]:
+        """暂停额度结果直到模型请求已经标记认证失败。"""
+        started.set()
+        await finish.wait()
+        if usage_fails:
+            raise RuntimeError("temporary quota failure")
+        return usage_snapshot(100)
+
+    monkeypatch.setattr(oauth_pool_module, "fetch_codex_usage_snapshot", delayed_usage)
+    task = asyncio.create_task(pool.refresh_account("account-a"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        with pytest.raises(NoAvailableOAuthAccounts):
+            await pool.create_response({"model": "test"})
+        finish.set()
+        assert await task is None
+        assert pool.runtimes["account-a"].status == "login_required"
+        assert "重新登录" in pool.runtimes["account-a"].last_error
+        assert "account-a" not in pool._available_keys()
+    finally:
+        finish.set()
+        await task
         await pool.close()
 
 

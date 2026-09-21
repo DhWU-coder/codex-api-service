@@ -46,7 +46,15 @@ You can complete Codex login first:
 codex
 ```
 
-If no usable token exists on the machine, the first API request will start the browser OAuth flow.
+Accounts with missing credentials or authentication failures are marked as requiring login and
+excluded from rotation without changing their enabled setting. Sign in again from the console
+to restore them with new, unexpired credentials; requests never start an interactive login flow.
+Ordinary requests can try another account before any streaming event has been sent. Requests
+bound by `previous_response_id` stay on their original account and return 409 if authentication fails.
+If no accounts are available, the service returns 503 with code `oauth_accounts_unavailable`
+(an error event for an already-started SSE stream). Temporary quota-read failures do not invalidate
+authentication, and stale quota results, restarts, or re-importing rejected credentials do not
+restore an invalid account. Rejection records contain token fingerprints only, not raw tokens.
 
 ## Configuration
 

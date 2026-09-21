@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from codex_api_service.oauth_scheduler import AccountCandidate, OAuthScheduler, account_dispatch_weight
+from codex_api_service.oauth_scheduler import AccountCandidate, NoAvailableOAuthAccounts, OAuthScheduler, account_dispatch_weight
 
 
 def candidate(
@@ -101,3 +101,18 @@ async def test_active_snapshot_includes_waiting_queue_size() -> None:
         await waiting
     await first.release()
     assert scheduler.active_snapshot()[2] == 0
+
+
+@pytest.mark.asyncio
+async def test_waiting_request_fails_when_last_account_loses_authorization() -> None:
+    """验证排队期间唯一账号失效后立即报 503，不会继续等待默认十分钟。"""
+    scheduler = OAuthScheduler(global_max=1, queue_timeout_seconds=600)
+    scheduler.update_accounts([candidate("a")])
+    lease = await scheduler.acquire()
+    waiting = asyncio.create_task(scheduler.acquire())
+    await asyncio.sleep(0)
+    scheduler.update_accounts([AccountCandidate(key="a", status="login_required")])
+    await lease.release()
+    with pytest.raises(NoAvailableOAuthAccounts):
+        await asyncio.wait_for(waiting, timeout=1)
+    assert scheduler.active_snapshot()[0] == scheduler.active_snapshot()[2] == 0

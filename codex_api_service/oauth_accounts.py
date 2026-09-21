@@ -76,6 +76,26 @@ class OAuthAccountStore:
         """返回指定账号的认证文件路径。"""
         return self.accounts_dir / key / "auth.json"
 
+    def rejected_credentials_fingerprint(self, key: str) -> str | None:
+        """读取认证失败指纹，服务重启后仍能拒绝同一份失效凭据。"""
+        path = self.accounts_dir / key / "auth-rejection.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        fingerprint = value.get("fingerprint") if isinstance(value, dict) else None
+        return fingerprint if isinstance(fingerprint, str) and fingerprint else None
+
+    def reject_credentials(self, key: str, fingerprint: str) -> None:
+        """只保存不可逆指纹，不修改原始凭据和用户选择的账号启用状态。"""
+        if self.rejected_credentials_fingerprint(key) == fingerprint:
+            return
+        self._atomic_json_write(
+            self.accounts_dir / key / "auth-rejection.json",
+            {"fingerprint": fingerprint},
+            mode=0o600,
+        )
+
     async def import_credentials(self, credentials: CodexCredentials, *, source: str) -> OAuthAccountRecord:
         """根据凭据中的真实账号标识更新或新增账号。"""
         payload = {

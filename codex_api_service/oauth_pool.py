@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .auth import CodexAuth, OAuthLoginRequired
+from .auth import CodexAuth, OAuthLoginRequired, _parse_auth_file, credentials_expired_or_near
 from .codex_client import CodexClient, CodexHTTPStatusError, _codex_client_version
 from .codex_usage import CodexUsageSession, fetch_codex_usage_snapshot
 from .config import AppConfig
 from .oauth_accounts import OAuthAccountRecord, OAuthAccountStore
 from .oauth_login import OAuthLoginManager
-from .oauth_scheduler import AccountCandidate, BoundAccountUnavailable, OAuthScheduler
+from .oauth_scheduler import AccountCandidate, BoundAccountUnavailable, NoAvailableOAuthAccounts, OAuthScheduler
 from .oauth_sync import OAuthSyncService
 from .response_bindings import ResponseBindingStore
 
@@ -47,6 +48,11 @@ class AccountRuntime:
     status: str = "available"
     last_error: str | None = None
     next_refresh_at: float = 0.0
+    # 指纹仅用于检测凭据变更，不包含明文令牌，也不出现在管理接口或日志中。
+    credentials_fingerprint: str | None = field(default=None, repr=False)
+    rejected_credentials_fingerprint: str | None = field(default=None, repr=False)
+    auth_generation: int = 0
+    reset_usage_session: bool = False
 
 
 class OAuthAccountPool:
@@ -105,6 +111,7 @@ class OAuthAccountPool:
         """为非流式请求选择账号并聚合响应。"""
         self._request_account.set(None)
         await self.ensure_initialized()
+        self._rebuild_runtimes()
         bound = self._bound_account(payload)
         upstream_payload = self._upstream_payload(payload)
         attempted: set[str] = set()
@@ -121,21 +128,31 @@ class OAuthAccountPool:
                 response = await runtime.client.create_response(upstream_payload)
                 self._remember_response(response, runtime.record.key)
                 return response
+            except OAuthLoginRequired as error:
+                last_error = error
+                self._mark_login_required(runtime)
+                if bound is not None:
+                    raise self._bound_auth_error() from error
             except CodexHTTPStatusError as error:
                 last_error = error
-                if bound is not None or error.status_code not in {401, 403, 429}:
+                if error.status_code not in {401, 403, 429}:
                     raise
                 await self._handle_switchable_error(runtime, error)
+                if bound is not None:
+                    if error.status_code in {401, 403}:
+                        raise self._bound_auth_error() from error
+                    raise
             finally:
                 await lease.release()
-        if last_error is not None:
+        if isinstance(last_error, CodexHTTPStatusError) and last_error.status_code == 429:
             raise last_error
-        raise OAuthLoginRequired("No available OAuth accounts")
+        raise NoAvailableOAuthAccounts("没有可用的 OAuth 账号，请检查账号登录状态、启用状态和额度") from last_error
 
     async def stream_response(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         """为流式请求选择账号，并在流结束时释放并发槽。"""
         self._request_account.set(None)
         await self.ensure_initialized()
+        self._rebuild_runtimes()
         bound = self._bound_account(payload)
         upstream_payload = self._upstream_payload(payload)
         attempted: set[str] = set()
@@ -154,16 +171,27 @@ class OAuthAccountPool:
                         self._remember_response(response, runtime.record.key)
                     yield event
                 return
+            except OAuthLoginRequired as error:
+                last_error = error
+                self._mark_login_required(runtime)
+                if bound is not None:
+                    raise self._bound_auth_error() from error
+                if emitted:
+                    raise
             except CodexHTTPStatusError as error:
                 last_error = error
-                if emitted or bound is not None or error.status_code not in {401, 403, 429}:
+                if error.status_code not in {401, 403, 429}:
                     raise
                 await self._handle_switchable_error(runtime, error)
+                if bound is not None and error.status_code in {401, 403}:
+                    raise self._bound_auth_error() from error
+                if emitted or bound is not None:
+                    raise
             finally:
                 await lease.release()
-        if last_error is not None:
+        if isinstance(last_error, CodexHTTPStatusError) and last_error.status_code == 429:
             raise last_error
-        raise OAuthLoginRequired("No available OAuth accounts")
+        raise NoAvailableOAuthAccounts("没有可用的 OAuth 账号，请检查账号登录状态、启用状态和额度") from last_error
 
     def request_account_metadata(self) -> dict[str, str] | None:
         """返回当前请求最后一次实际选中账户的安全元数据。"""
@@ -183,6 +211,19 @@ class OAuthAccountPool:
         runtime = self.runtimes.get(key)
         if runtime is None:
             return None
+        credentials_ready = self._check_account_credentials(runtime)
+        self._update_scheduler()
+        generation = runtime.auth_generation
+        if runtime.reset_usage_session:
+            session = self._usage_sessions.pop(key, None)
+            runtime.reset_usage_session = False
+            if session is not None:
+                await session.close()
+        if not credentials_ready:
+            runtime.next_refresh_at = time.time() + 30
+            return None
+        if not self._refresh_is_current(runtime, generation):
+            return None
         session = self._usage_sessions.get(key)
         if session is None:
             session = CodexUsageSession(account_home=self.store.auth_path(key).parent)
@@ -193,9 +234,14 @@ class OAuthAccountPool:
                 app_server_rpc=session.read_rate_limits,
             )
         except Exception:
+            if not self._refresh_is_current(runtime, generation):
+                return None
             runtime.last_error = "额度读取失败"
             # 保留最后一次成功快照，同时安排退避重试，避免失败时每五秒重启 app-server。
             runtime.next_refresh_at = time.time() + 30
+            return None
+        # 调用失败或重新登录可能发生在额度请求期间，旧结果不能覆盖新的认证状态。
+        if not self._refresh_is_current(runtime, generation):
             return None
         runtime.usage = usage
         runtime.status = "available" if usage.get("rateLimit", {}).get("allowed", True) else "rate_limited"
@@ -228,6 +274,7 @@ class OAuthAccountPool:
 
     def snapshot(self) -> dict[str, Any]:
         """返回不包含 token 的多账号管理快照。"""
+        self._rebuild_runtimes()
         global_active, account_active, waiting_count = self.scheduler.active_snapshot()
         items = []
         weights: dict[str, float] = {}
@@ -293,7 +340,10 @@ class OAuthAccountPool:
                 self.runtimes.pop(key)
         for key, record in records.items():
             existing = self.runtimes.get(key)
-            if existing is not None and existing.record == record:
+            if existing is not None:
+                existing.record = record
+                # 同账号重新登录可能不改变注册信息，仍必须重新核对凭据。
+                self._check_account_credentials(existing)
                 continue
             auth = CodexAuth(
                 auth_path=self.store.auth_path(key),
@@ -304,17 +354,82 @@ class OAuthAccountPool:
             self.runtimes[key] = AccountRuntime(
                 record=record,
                 client=CodexClient(auth=auth, config=self.config.codex),
-                usage=existing.usage if existing else None,
-                status=existing.status if existing else "available",
+                rejected_credentials_fingerprint=self.store.rejected_credentials_fingerprint(key),
             )
+            self._check_account_credentials(self.runtimes[key])
         self._update_scheduler()
+
+    def _check_account_credentials(self, runtime: AccountRuntime) -> bool:
+        """检查隔离凭据，失效账号只有换成新的未过期凭据才允许重新入池。"""
+        credentials = _parse_auth_file(self.store.auth_path(runtime.record.key))
+        if credentials is None:
+            if runtime.status != "login_required" or runtime.credentials_fingerprint is not None:
+                self._mark_login_required(runtime)
+            return False
+        fingerprint = self._credentials_fingerprint(credentials.access, credentials.refresh)
+        blocked = runtime.status in {"login_required", "auth_error"}
+        if fingerprint == runtime.rejected_credentials_fingerprint:
+            if not blocked:
+                self._mark_login_required(runtime)
+            return False
+        if blocked and credentials_expired_or_near(credentials):
+            return False
+        if fingerprint != runtime.credentials_fingerprint:
+            runtime.reset_usage_session = runtime.reset_usage_session or blocked or runtime.credentials_fingerprint is not None
+            runtime.credentials_fingerprint = fingerprint
+            runtime.auth_generation += 1
+            runtime.next_refresh_at = 0
+            if blocked:
+                runtime.status = "available"
+                runtime.last_error = None
+        return True
+
+    @staticmethod
+    def _credentials_fingerprint(access: str, refresh: str) -> str:
+        """比较令牌内容而非文件时间，避免同一失效凭据被周期同步后误恢复。"""
+        return hashlib.sha256(f"{access}\0{refresh}".encode()).hexdigest()
+
+    def _mark_login_required(self, runtime: AccountRuntime) -> None:
+        """立即隔离认证失败账号，保留启用设置供重新登录后恢复。"""
+        credentials = _parse_auth_file(self.store.auth_path(runtime.record.key))
+        fingerprint = (
+            self._credentials_fingerprint(credentials.access, credentials.refresh) if credentials else None
+        )
+        # 自动刷新失败可能已删除认证文件，仍记住最后一次被拒绝的凭据，避免旧文件同步后复活。
+        runtime.rejected_credentials_fingerprint = (
+            fingerprint or runtime.credentials_fingerprint or runtime.rejected_credentials_fingerprint
+        )
+        runtime.credentials_fingerprint = fingerprint
+        runtime.status = "login_required"
+        runtime.last_error = "OAuth 凭据缺失或失效，请重新登录"
+        runtime.auth_generation += 1
+        runtime.reset_usage_session = True
+        runtime.next_refresh_at = time.time() + 30
+        self._update_scheduler()
+        if runtime.rejected_credentials_fingerprint:
+            try:
+                self.store.reject_credentials(runtime.record.key, runtime.rejected_credentials_fingerprint)
+            except OSError:
+                # 状态持久化失败不能中断健康账号回退；内存隔离仍然生效并在界面明确提示。
+                runtime.last_error += "；认证失败状态保存失败"
+
+    def _refresh_is_current(self, runtime: AccountRuntime, generation: int) -> bool:
+        """防止旧额度读取结果复活已失效、已删除或刚更换凭据的账号。"""
+        if self.runtimes.get(runtime.record.key) is not runtime:
+            return False
+        ready = self._check_account_credentials(runtime)
+        self._update_scheduler()
+        return ready and runtime.auth_generation == generation
+
+    @staticmethod
+    def _bound_auth_error() -> BoundAccountUnavailable:
+        """绑定会话认证失败时明确报错，禁止切换到其他账号继续上下文。"""
+        return BoundAccountUnavailable("previous_response_id 所属 OAuth 账户需要重新登录，请重新登录该账号或不带 previous_response_id 发起新会话")
 
     async def _handle_switchable_error(self, runtime: AccountRuntime, error: CodexHTTPStatusError) -> None:
         """处理认证或额度错误，并让普通请求切换其他账号。"""
         if error.status_code in {401, 403}:
-            runtime.status = "auth_error"
-            runtime.last_error = "OAuth 认证失败"
-            await self.sync_global()
+            self._mark_login_required(runtime)
         else:
             runtime.status = "rate_limited"
             runtime.last_error = "5 小时额度或请求频率受限"

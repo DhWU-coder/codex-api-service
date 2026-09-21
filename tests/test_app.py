@@ -1269,6 +1269,31 @@ async def test_unavailable_previous_response_account_returns_409_and_is_logged(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_empty_oauth_pool_returns_explicit_503_and_logs_failure(tmp_path: Path, stream: bool) -> None:
+    """验证无可用账号通过实际账号池返回稳定错误，不误报本地 API key 错误或未知 500。"""
+    app = create_app(config=make_test_config(tmp_path))
+    pool = app.state.oauth_account_pool
+    # 测试使用空的隔离账号库，禁止导入开发机的全局登录。
+    pool._initialized = True
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/v1/responses", json={"input": "hello", "stream": stream})
+            logs = (await client.get("/admin/requests")).json()["items"]
+        if stream:
+            assert '"code":"oauth_accounts_unavailable"' in response.text
+            assert '"type":"service_unavailable_error"' in response.text
+            assert "data: [DONE]" in response.text
+        else:
+            assert response.status_code == 503
+            assert response.json()["error"]["code"] == "oauth_accounts_unavailable"
+            assert response.json()["error"]["type"] == "service_unavailable_error"
+        assert logs[0]["status_code"] == 503
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_admin_oauth_dispatch_updates_mode_and_snapshot(tmp_path: Path) -> None:
     """验证管理接口原子切换单账户模式并返回负载统计字段。"""
     app = create_app(config=make_test_config(tmp_path))

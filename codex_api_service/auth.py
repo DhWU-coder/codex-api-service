@@ -42,6 +42,11 @@ class CodexCredentials:
 class OAuthLoginRequired(RuntimeError):
     """表示账号凭据缺失或失效，需要显式重新登录。"""
 
+    # 上游账号不可用不等于调用方的本地 API key 错误。
+    status_code = 503
+    error_code = "oauth_login_required"
+    error_type = "service_unavailable_error"
+
 
 def default_auth_path() -> Path:
     """返回本服务默认保存 OAuth 凭据的位置。"""
@@ -267,7 +272,7 @@ def _parse_auth_file(path: Path) -> CodexCredentials | None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
-    if data.get("auth_mode") != "chatgpt":
+    if not isinstance(data, dict) or data.get("auth_mode") != "chatgpt":
         return None
     tokens = data.get("tokens")
     if not isinstance(tokens, dict):

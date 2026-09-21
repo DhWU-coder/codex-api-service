@@ -97,6 +97,11 @@ function formatClientIp(clientIp: string | null | undefined): string {
   return isLoopback ? `本机（${normalized}）` : normalized;
 }
 
+// 认证失效在账号页、额度页和负载页统一显示，避免仍被理解成可用账号。
+function formatOAuthAccountStatus(status: string): string {
+  return status === "login_required" || status === "auth_error" ? "需要重新登录" : status;
+}
+
 // 没有目录元数据时保留旧四档，保证配置兜底仍可编辑。
 const DEFAULT_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"];
 
@@ -2173,7 +2178,7 @@ export function App() {
                         <p>{formatPlanType(account.usage?.planType || "未知套餐")} · {account.source}</p>
                       </div>
                       <span className={`status-badge ${account.status === "available" ? "ok" : "warning"}`}>
-                        {account.enabled ? account.status : "已停用"}
+                        {account.enabled ? formatOAuthAccountStatus(account.status) : "已停用"}
                       </span>
                     </div>
                     <div className="oauth-account-metrics">
@@ -2293,7 +2298,7 @@ export function App() {
                       <div className="account-load-label">
                         <strong>{account.alias}</strong>
                         <small>
-                          {formatPlanType(account.usage?.planType || "未知套餐")} · {account.enabled ? account.status : "已停用"}
+                          {formatPlanType(account.usage?.planType || "未知套餐")} · {account.enabled ? formatOAuthAccountStatus(account.status) : "已停用"}
                         </small>
                         <small className="account-load-quota">
                           {primaryWindow?.label || "额度"} 剩余额度：{primaryWindow ? `${primaryWindow.remainingPercent}%` : "-"}
@@ -2365,7 +2370,9 @@ export function App() {
                   <section className="codex-account-usage" key={account.key}>
                     <div className="oauth-account-head">
                       <div><h3>{account.alias}</h3><p><strong>{formatPlanType(account.usage?.planType || "-")}</strong> · 预计占比 {Math.round(account.estimatedShare * 100)}%</p></div>
-                      <span className="status-badge ok">{account.status}</span>
+                      <span className={`status-badge ${account.enabled && account.status === "available" ? "ok" : "warning"}`}>
+                        {account.enabled ? formatOAuthAccountStatus(account.status) : "已停用"}
+                      </span>
                     </div>
                     {account.lastError ? (
                       <div className="banner error">

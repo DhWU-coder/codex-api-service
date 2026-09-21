@@ -36,6 +36,14 @@ class QueueWaitTimeout(RuntimeError):
     """表示请求等待并发槽位超时。"""
 
 
+class NoAvailableOAuthAccounts(RuntimeError):
+    """表示当前没有可调度的 OAuth 账号，不应继续等待并发槽。"""
+
+    status_code = 503
+    error_code = "oauth_accounts_unavailable"
+    error_type = "service_unavailable_error"
+
+
 def account_dispatch_weight(account: AccountCandidate, *, now: float | None = None) -> float:
     """按套餐、5 小时剩余比例和重置分钟数计算账号权重。"""
     current = time.time() if now is None else now
@@ -132,23 +140,27 @@ class OAuthScheduler:
 
     def _choose_available(self, bound_account_key: str | None, excluded_account_keys: set[str]) -> str | None:
         """在当前槽位状态下选择绑定账号或普通加权账号。"""
-        if self.global_max is not None and self._global_active >= self.global_max:
-            return None
         if bound_account_key is not None:
             account = self._accounts.get(bound_account_key)
             if account is None or not account.enabled or account.status != "available":
                 raise BoundAccountUnavailable(
-                    "previous_response_id 所属 OAuth 账户已停用，请不带 previous_response_id 发起新会话"
+                    "previous_response_id 所属 OAuth 账户当前不可用，请重新登录该账号或不带 previous_response_id 发起新会话"
                 )
+            if self.global_max is not None and self._global_active >= self.global_max:
+                return None
             return bound_account_key if self._has_account_slot(account) else None
-        candidates = [
+        eligible = [
             item
             for item in self._accounts.values()
             if item.key not in excluded_account_keys
             and item.enabled
             and item.status == "available"
-            and self._has_account_slot(item)
         ]
+        if not eligible:
+            raise NoAvailableOAuthAccounts("没有可用的 OAuth 账号，请检查账号登录状态、启用状态和额度")
+        if self.global_max is not None and self._global_active >= self.global_max:
+            return None
+        candidates = [item for item in eligible if self._has_account_slot(item)]
         if not candidates:
             return None
         weighted = [(item, account_dispatch_weight(item, now=self.clock())) for item in candidates]
