@@ -102,6 +102,27 @@ function formatOAuthAccountStatus(status: string): string {
   return status === "login_required" || status === "auth_error" ? "需要重新登录" : status;
 }
 
+// 来源状态表示本地凭据是否保存或已被拒绝，不承诺上游仍然有效。
+function formatAuthorizationSource(source: string): string {
+  return source === "web-oauth" ? "Web" : source === "codex-cli" ? "CLI" : "历史授权";
+}
+
+function AccountAuthorizations({ account }: { account: OAuthAccountSnapshot }) {
+  if (!account.authorizations) return null;
+  return (
+    <div className="oauth-authorization-list" aria-label={`${account.alias} 授权状态`}>
+      {account.authorizations.map((authorization) => (
+        <span className="oauth-authorization-item" key={authorization.source}>
+          <strong>{formatAuthorizationSource(authorization.source)}</strong>
+          {authorization.status === "missing" ? "未授权" : authorization.status === "login_required" ? "需要重新登录" : "已保存"}
+          {authorization.active ? " · 当前使用" : ""}
+          {authorization.updatedAt > 0 ? <span> · 更新 {formatResetTime(authorization.updatedAt)}</span> : null}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 // 没有目录元数据时保留旧四档，保证配置兜底仍可编辑。
 const DEFAULT_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"];
 
@@ -2206,12 +2227,14 @@ export function App() {
                     <div className="oauth-account-head">
                       <div>
                         <h3>{account.alias}</h3>
-                        <p>{formatPlanType(account.usage?.planType || "未知套餐")} · {account.source}</p>
+                        <p>{formatPlanType(account.usage?.planType || "未知套餐")} · {account.authorizations && !account.authorizations.some((item) => item.active)
+                          ? "无可用授权" : `当前授权 ${formatAuthorizationSource(account.source)}`}</p>
                       </div>
                       <span className={`status-badge ${account.status === "available" ? "ok" : "warning"}`}>
                         {account.enabled ? formatOAuthAccountStatus(account.status) : "已停用"}
                       </span>
                     </div>
+                    <AccountAuthorizations account={account} />
                     <div className="oauth-account-metrics">
                       <span><span className="metric-label">并发上限</span><strong>{account.maxConcurrency ?? "不限制"}</strong></span>
                       <span><span className="metric-label">权重</span><strong>{formatDisplayWeight(account.weight)}</strong></span>

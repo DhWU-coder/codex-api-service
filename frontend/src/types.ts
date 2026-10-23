@@ -130,6 +130,13 @@ export type OAuthAccountSnapshot = {
   alias: string;
   enabled: boolean;
   source: string;
+  // 同一账号的两种授权仅展示脱敏状态，不生成两个调度身份。
+  authorizations?: Array<{
+    source: string;
+    status: "missing" | "available" | "login_required";
+    active: boolean;
+    updatedAt: number;
+  }>;
   maxConcurrency: number | null;
   currentConcurrency: number;
   status: string;

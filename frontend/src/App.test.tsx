@@ -737,6 +737,49 @@ describe("App theme mode", () => {
     expect(footer?.querySelector(".oauth-account-actions")).toBeTruthy();
   });
 
+  it("shows separate Web and CLI authorization states without duplicating the account", async () => {
+    // 授权只作为同一账号的两份凭据展示，当前来源、失效状态和更新时间均可辨认。
+    oauthAccountsResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({
+        ...account,
+        source: "web-oauth",
+        authorizations: [
+          { source: "web-oauth", status: "available", active: true, updatedAt: 1783814600 },
+          { source: "codex-cli", status: "login_required", active: false, updatedAt: 1783814500 }
+        ]
+      }))
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    const statuses = await screen.findByLabelText("账号 A 授权状态");
+    expect(statuses.textContent).toContain("Web已保存 · 当前使用");
+    expect(statuses.textContent).toContain("CLI需要重新登录");
+    expect(statuses.textContent).toContain(new Date(1783814600 * 1000).toLocaleString());
+    expect(screen.getAllByRole("heading", { name: "账号 A" })).toHaveLength(1);
+    expect(screen.getByText(/当前授权 Web/)).toBeTruthy();
+  });
+
+  it("shows a missing authorization slot without suggesting it is currently in use", async () => {
+    // 没有另一种授权时显示未授权，不把缺失凭据伪装成可用备份。
+    oauthAccountsResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({
+        ...account,
+        authorizations: [
+          { source: "web-oauth", status: "missing", active: false, updatedAt: 0 },
+          { source: "codex-cli", status: "login_required", active: false, updatedAt: 1783814500 }
+        ]
+      }))
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    const statuses = await screen.findByLabelText("账号 A 授权状态");
+    expect(statuses.textContent).toContain("Web未授权");
+    expect(statuses.textContent).not.toContain("当前使用");
+    expect(screen.getByText(/无可用授权/)).toBeTruthy();
+  });
+
   it("scales each capacity track by account limit or observed unlimited load", async () => {
     // 统一刻度为 5：不限账户当前 5 占满，上限 2 的账户轨道只占 40%。
     const baseAccount = oauthAccountsStatus.accounts[0];

@@ -23,6 +23,10 @@ class CodexUsageFetchError(RuntimeError):
     """表示 Codex 额度状态不可用。"""
 
 
+class CodexUsageAuthError(CodexUsageFetchError):
+    """表示额度 RPC 明确要求重新登录，而非临时网络或服务故障。"""
+
+
 class CodexUsageSession:
     """复用单个账号的 Codex app-server 额度读取会话。"""
 
@@ -68,6 +72,9 @@ class CodexUsageSession:
                     return await _read_rpc_result(process, request_id, timeout)
                 except asyncio.CancelledError:
                     # 总超时或停服取消后回收当前进程，下一次请求不能复用半截 RPC。
+                    await self._stop_locked()
+                    raise
+                except CodexUsageAuthError:
                     await self._stop_locked()
                     raise
                 except Exception as error:
@@ -167,6 +174,8 @@ async def fetch_codex_usage_snapshot(
                 APP_SERVER_TIMEOUT_SECONDS,
                 account_home=account_home,
             )
+    except CodexUsageAuthError:
+        raise
     except Exception as error:  # pragma: no cover - 真实 app-server 异常依赖本机 Codex 安装。
         raise CodexUsageFetchError("Codex usage status unavailable") from error
     return summarize_codex_usage(payload)
@@ -243,6 +252,15 @@ async def _read_rpc_result(process: asyncio.subprocess.Process, request_id: int,
         if message.get("id") != request_id:
             continue
         if "error" in message:
+            detail = message["error"]
+            text = json.dumps(detail, ensure_ascii=False).lower()
+            code = detail.get("code") if isinstance(detail, dict) else None
+            if code == 401 or code == 403 or any(marker in text for marker in (
+                "not logged in", "authentication required", "requires login", "login required",
+                "refresh_token_invalidated", "refresh_token_reused", "invalid_grant", "token_revoked",
+            )):
+                # 原始 RPC 错误可能包含敏感内容，对外仅保留安全的错误类型。
+                raise CodexUsageAuthError("Codex account requires login")
             raise CodexUsageFetchError("Codex usage status unavailable")
         result = message.get("result")
         if not isinstance(result, dict):

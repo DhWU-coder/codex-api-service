@@ -16,6 +16,7 @@ import httpx
 
 from .auth import CodexAuth
 from .config import CodexConfig
+from .oauth_credentials import credentials_fingerprint
 
 # 这些状态通常是临时上游错误，可以在没有输出任何事件前重试。
 RETRYABLE_HTTP_STATUS = {502, 503, 504}
@@ -32,6 +33,7 @@ class CodexHTTPStatusError(RuntimeError):
         error_type: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        credentials_fingerprint: str | None = None,
     ) -> None:
         """保存状态码、OpenAI 错误字段和响应体供重试判断与报错。"""
         parsed_type, parsed_code, parsed_message = _error_fields_from_body(body)
@@ -40,6 +42,7 @@ class CodexHTTPStatusError(RuntimeError):
         self.error_type = error_type or parsed_type or _error_type_for_code(error_code or parsed_code)
         self.error_code = error_code or parsed_code
         self.error_message = error_message or parsed_message
+        self.credentials_fingerprint = credentials_fingerprint
         detail = self.error_message or _body_snippet(body)
         super().__init__(f"Codex request failed: HTTP {status_code}: {detail}")
 
@@ -155,7 +158,9 @@ class CodexClient:
                             if imported is not None:
                                 reloaded_after_revocation = True
                                 continue
-                        raise CodexHTTPStatusError(response.status_code, body)
+                        raise CodexHTTPStatusError(
+                            response.status_code, body, credentials_fingerprint=credentials_fingerprint(credentials),
+                        )
 
                     # 非 SSE JSON 响应也兼容成 completed 事件，便于后续扩展。
                     content_type = response.headers.get("content-type", "")
@@ -167,14 +172,18 @@ class CodexClient:
                             for event in buffered_events:
                                 event_error = codex_event_error(event)
                                 if event_error is not None:
+                                    event_error.credentials_fingerprint = credentials_fingerprint(credentials)
                                     raise event_error
                                 yield event
                             return
-                        yield _non_sse_response_event(
-                            status_code=response.status_code,
-                            content_type=content_type,
-                            body=body,
-                        )
+                        try:
+                            event = _non_sse_response_event(
+                                status_code=response.status_code, content_type=content_type, body=body,
+                            )
+                        except CodexHTTPStatusError as error:
+                            error.credentials_fingerprint = credentials_fingerprint(credentials)
+                            raise
+                        yield event
                         return
 
                     # SSE 每个 data 行都是一个 JSON event；[DONE] 表示流结束。
@@ -186,6 +195,7 @@ class CodexClient:
                             continue
                         event_error = codex_event_error(event)
                         if event_error is not None:
+                            event_error.credentials_fingerprint = credentials_fingerprint(credentials)
                             raise event_error
                         yield event
                         if event.get("type") == "response.completed":

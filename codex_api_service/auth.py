@@ -47,6 +47,11 @@ class OAuthLoginRequired(RuntimeError):
     error_code = "oauth_login_required"
     error_type = "service_unavailable_error"
 
+    def __init__(self, message: str, *, credentials_fingerprint: str | None = None) -> None:
+        """内部携带实际失败凭据的摘要，防止并发旧请求误伤新授权。"""
+        super().__init__(message)
+        self.credentials_fingerprint = credentials_fingerprint
+
 
 def default_auth_path() -> Path:
     """返回本服务默认保存 OAuth 凭据的位置。"""
@@ -274,6 +279,13 @@ def _parse_auth_file(path: Path) -> CodexCredentials | None:
         return None
     if not isinstance(data, dict) or data.get("auth_mode") != "chatgpt":
         return None
+    return _credentials_from_auth_payload(data)
+
+
+def _credentials_from_auth_payload(data: dict) -> CodexCredentials | None:
+    """从同一份已解析快照提取身份与令牌，避免文件并发替换造成账号错配。"""
+    if data.get("auth_mode") != "chatgpt":
+        return None
     tokens = data.get("tokens")
     if not isinstance(tokens, dict):
         return None
@@ -355,6 +367,9 @@ def _is_refresh_token_invalidated(error: RuntimeError) -> bool:
         marker in message
         for marker in (
             "refresh_token_invalidated",
+            "refresh_token_reused",
+            "refresh_token_expired",
+            "refresh_token_revoked",
             "invalid_grant",
             "Your session has ended",
         )

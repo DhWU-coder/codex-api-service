@@ -9,10 +9,29 @@ import pytest
 
 import codex_api_service.codex_usage as codex_usage
 from codex_api_service.codex_usage import (
+    CodexUsageAuthError,
     CodexUsageFetchError,
     fetch_codex_usage_snapshot,
     summarize_codex_usage,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("detail", "auth_error"), [
+    ({"code": 401, "message": "denied"}, True),
+    ({"code": -32000, "message": "Not logged in"}, True),
+    ({"code": -32000, "message": "refresh_token_reused"}, True),
+    ({"code": 503, "message": "server is overloaded"}, False),
+    ({"code": {"nested": 401}, "message": "temporary error"}, False),
+])
+async def test_quota_rpc_classifies_only_explicit_auth_failures(detail: dict, auth_error: bool) -> None:
+    """验证额度读取只对明确的认证失败回退，不暴露原始错误正文。"""
+    process = FakeAppServerProcess()
+    process.stdout.lines.put_nowait((json.dumps({"id": 1, "error": detail}) + "\n").encode())
+    with pytest.raises(CodexUsageFetchError) as caught:
+        await codex_usage._read_rpc_result(process, 1, 1)
+    assert isinstance(caught.value, CodexUsageAuthError) is auth_error
+    assert str(caught.value) in {"Codex account requires login", "Codex usage status unavailable"}
 
 
 class FakeAppServerStdout:

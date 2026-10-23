@@ -2486,3 +2486,16 @@ th {
     min-width: calc(50% - 12px);
   }
 }
+/* 授权来源和脱敏状态采用紧凑横排，窄屏自动折行。 */
+.oauth-authorization-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 12px 0;
+  color: var(--page-muted);
+  font-size: 12px;
+}
+
+.oauth-authorization-item strong {
+  margin-right: 6px;
+}

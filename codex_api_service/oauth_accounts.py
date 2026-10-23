@@ -9,12 +9,13 @@ import hashlib
 import json
 import os
 import shutil
-import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .auth import CodexCredentials, _parse_auth_file
+from .auth import CodexCredentials, _credentials_from_auth_payload, _parse_auth_file
+from .oauth_credentials import AccountAuthorizations, atomic_json_write
 
 
 def _identity_alias(id_token: str | None) -> str | None:
@@ -59,6 +60,7 @@ class OAuthAccountStore:
         self._registry_lock = asyncio.Lock()
         self._account_locks: dict[str, asyncio.Lock] = {}
         self._records: dict[str, OAuthAccountRecord] = {}
+        self._authorizations: dict[str, AccountAuthorizations] = {}
         self.dispatch_mode = "multi"
         self.single_account_key: str | None = None
         self._prepare_directories()
@@ -76,6 +78,15 @@ class OAuthAccountStore:
         """返回指定账号的认证文件路径。"""
         return self.accounts_dir / key / "auth.json"
 
+    def authorizations(self, key: str) -> AccountAuthorizations:
+        """按账号复用授权管理器，旧来源仅用于首次迁移。"""
+        if key not in self._authorizations:
+            record = self.get(key)
+            self._authorizations[key] = AccountAuthorizations(
+                self.auth_path(key).parent, legacy_source=record.source if record else "unknown",
+            )
+        return self._authorizations[key]
+
     def rejected_credentials_fingerprint(self, key: str) -> str | None:
         """读取认证失败指纹，服务重启后仍能拒绝同一份失效凭据。"""
         path = self.accounts_dir / key / "auth-rejection.json"
@@ -88,6 +99,7 @@ class OAuthAccountStore:
 
     def reject_credentials(self, key: str, fingerprint: str) -> None:
         """只保存不可逆指纹，不修改原始凭据和用户选择的账号启用状态。"""
+        self.authorizations(key).reject(fingerprint)
         if self.rejected_credentials_fingerprint(key) == fingerprint:
             return
         self._atomic_json_write(
@@ -109,21 +121,21 @@ class OAuthAccountStore:
             },
             "expires": credentials.expires,
         }
-        return await self._import(credentials, payload=payload, source=source)
+        return await self._import(credentials, payload=payload, source=source, updated_at=time.time())
 
     async def import_auth_file(self, path: Path | str, *, source: str) -> OAuthAccountRecord:
         """按真实账号归档 Codex 原生 auth.json，并保留顶层元数据。"""
         source_path = Path(path)
-        credentials = _parse_auth_file(source_path)
-        if credentials is None:
-            raise ValueError("OAuth auth file is invalid")
         try:
             payload = json.loads(source_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError("OAuth auth file is invalid") from error
         if not isinstance(payload, dict):
             raise ValueError("OAuth auth file is invalid")
-        return await self._import(credentials, payload=payload, source=source)
+        credentials = _credentials_from_auth_payload(payload)
+        if credentials is None:
+            raise ValueError("OAuth auth file is invalid")
+        return await self._import(credentials, payload=payload, source=source, updated_at=source_path.stat().st_mtime)
 
     async def _import(
         self,
@@ -131,6 +143,7 @@ class OAuthAccountStore:
         *,
         payload: dict[str, Any],
         source: str,
+        updated_at: float,
     ) -> OAuthAccountRecord:
         """在识别账号后保存指定认证内容和注册信息。"""
         account_id = (credentials.account_id or "").strip()
@@ -142,7 +155,9 @@ class OAuthAccountStore:
             account_dir = self.accounts_dir / key
             account_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             os.chmod(account_dir, 0o700)
-            self._atomic_json_write(self.auth_path(key), payload, mode=0o600)
+            authorizations = self.authorizations(key)
+            authorizations.import_payload(payload, source=source, updated_at=updated_at)
+            selected = authorizations.select()
             async with self._registry_lock:
                 existing = self._records.get(key)
                 generated_alias = f"账号 {key[-6:]}"
@@ -156,7 +171,7 @@ class OAuthAccountStore:
                     key=key,
                     alias=alias,
                     enabled=existing.enabled if existing else self.dispatch_mode == "multi",
-                    source=source,
+                    source=selected.source if selected and selected.source != "legacy" else source,
                     max_concurrency=existing.max_concurrency if existing else None,
                 )
                 self._records[key] = record
@@ -258,6 +273,7 @@ class OAuthAccountStore:
                 if self.dispatch_mode == "single" and key == self.single_account_key:
                     raise ValueError("select another single account before deleting this account")
                 self._records.pop(key)
+                self._authorizations.pop(key, None)
                 self._save_registry()
             shutil.rmtree(self.accounts_dir / key, ignore_errors=True)
 
@@ -329,17 +345,4 @@ class OAuthAccountStore:
     @staticmethod
     def _atomic_json_write(path: Path, payload: dict[str, Any], *, mode: int) -> None:
         """在同目录写临时文件后原子替换目标文件。"""
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.chmod(temporary_name, mode)
-            os.replace(temporary_name, path)
-        finally:
-            try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
-                pass
+        atomic_json_write(path, payload, mode=mode)
