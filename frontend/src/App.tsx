@@ -538,6 +538,18 @@ function primaryUsageWindow(account: OAuthAccountSnapshot) {
     || windows.filter((item) => item.limitWindowSeconds > 0).sort((left, right) => left.limitWindowSeconds - right.limitWindowSeconds)[0];
 }
 
+function QuotaFreshness({ account }: { account: OAuthAccountSnapshot }) {
+  // 成功更新时间与额度重置时间分别展示，避免旧缓存看起来始终有效。
+  const updatedAt = account.lastSuccessfulRefreshAt || 0;
+  return (
+    <p className="quota-freshness">
+      <span>额度更新：{updatedAt ? formatResetTime(updatedAt) : "尚未成功刷新"}</span>
+      {(account.usageStale ?? !updatedAt) ? <strong>数据已过期</strong> : null}
+      {account.usageRefreshing ? <span>刷新中…</span> : null}
+    </p>
+  );
+}
+
 function quotaTone(remainingPercent: number): "normal" | "warning" | "critical" {
   // 额度低于不同阈值时使用更醒目的提示颜色。
   if (remainingPercent < 5) {
@@ -790,11 +802,11 @@ export function App() {
     }
   }, [apiKey]);
 
-  const loadOAuthAccounts = useCallback(async () => {
+  const loadOAuthAccounts = useCallback(async (force = false) => {
     try {
       setError("");
       setIsLoadingOauthAccounts(true);
-      setOauthAccounts(await fetchOAuthAccounts(apiKey));
+      setOauthAccounts(await (force ? refreshOAuthAccounts(apiKey) : fetchOAuthAccounts(apiKey)));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "OAuth 账号读取失败");
     } finally {
@@ -1037,6 +1049,25 @@ export function App() {
     const interval = window.setInterval(() => void loadOAuthAccounts(), 1000);
     return () => window.clearInterval(interval);
   }, [activeTab, loadOAuthAccounts]);
+
+  useEffect(() => {
+    if (activeTab !== "oauth-accounts" && activeTab !== "usage-status") {
+      return;
+    }
+    // 仅同步可见页面的缓存与新鲜度；自动读取额度仍由后端按账号控制频率。
+    let cancelled = false;
+    const interval = window.setInterval(() => {
+      void fetchOAuthAccounts(apiKey).then((snapshot) => {
+        if (!cancelled) setOauthAccounts(snapshot);
+      }).catch(() => {
+        // 暂时断网保留当前数据，下一次轮询继续尝试，不覆盖手动刷新错误。
+      });
+    }, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [activeTab, apiKey]);
 
   // 流式输出时自动滚动到最新消息。
   useEffect(() => {
@@ -2117,7 +2148,7 @@ export function App() {
                 <p>管理项目账号库、账号并发和 Codex CLI 登录同步。</p>
               </div>
               <div className="toolbar-actions oauth-toolbar-actions">
-                <button className="secondary-button oauth-toolbar-button" onClick={() => void loadOAuthAccounts()} disabled={isLoadingOauthAccounts}>
+                <button className="secondary-button oauth-toolbar-button" onClick={() => void loadOAuthAccounts(true)} disabled={isLoadingOauthAccounts}>
                   <RefreshCw size={16} />
                   刷新
                 </button>
@@ -2188,6 +2219,7 @@ export function App() {
                       <span><span className="metric-label">{primaryWindow?.label || "额度"} 剩余</span><strong>{primaryWindow?.remainingPercent ?? "-"}%</strong></span>
                       <span><span className="metric-label">{primaryWindow?.label || "额度"} 重置</span><strong>{formatResetTime(primaryWindow?.resetAt || 0)}</strong></span>
                     </div>
+                    <QuotaFreshness account={account} />
                     {account.lastError ? <div className="field-error">{account.lastError}</div> : null}
                     <div className="oauth-account-footer">
                       {primaryWindow ? (
@@ -2374,6 +2406,7 @@ export function App() {
                         {account.enabled ? formatOAuthAccountStatus(account.status) : "已停用"}
                       </span>
                     </div>
+                    <QuotaFreshness account={account} />
                     {account.lastError ? (
                       <div className="banner error">
                         <AlertTriangle size={18} />

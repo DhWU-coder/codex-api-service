@@ -138,6 +138,10 @@ export type OAuthAccountSnapshot = {
   weight: number;
   estimatedShare: number;
   nextRefreshAt: number;
+  // 兼容旧后端；缺少成功时间时不把缓存误认为刚刚刷新。
+  lastSuccessfulRefreshAt?: number;
+  usageStale?: boolean;
+  usageRefreshing?: boolean;
 };
 
 export type OAuthAccountsSnapshot = {

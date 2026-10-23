@@ -2048,6 +2048,19 @@ th {
   min-width: 240px;
 }
 
+/* 成功更新时间与过期提示使用独立行，窄屏允许自然换行。 */
+.quota-freshness {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--page-muted);
+  font-size: 13px;
+}
+
+.quota-freshness strong {
+  color: var(--danger-text);
+}
+
 .oauth-quota-visual-head {
   display: flex;
   align-items: center;

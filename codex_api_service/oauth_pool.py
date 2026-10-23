@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import time
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
@@ -20,6 +21,12 @@ from .oauth_login import OAuthLoginManager
 from .oauth_scheduler import AccountCandidate, BoundAccountUnavailable, NoAvailableOAuthAccounts, OAuthScheduler
 from .oauth_sync import OAuthSyncService
 from .response_bindings import ResponseBindingStore
+
+ACCOUNT_REFRESH_TIMEOUT_SECONDS = 30.0
+SESSION_CLEANUP_TIMEOUT_SECONDS = 10.0
+SYNC_TIMEOUT_SECONDS = 5.0
+BACKGROUND_POLL_SECONDS = 5.0
+logger = logging.getLogger(__name__)
 
 
 def _integer(value: Any) -> int:
@@ -48,6 +55,7 @@ class AccountRuntime:
     status: str = "available"
     last_error: str | None = None
     next_refresh_at: float = 0.0
+    last_successful_refresh_at: float = 0.0
     # 指纹仅用于检测凭据变更，不包含明文令牌，也不出现在管理接口或日志中。
     credentials_fingerprint: str | None = field(default=None, repr=False)
     rejected_credentials_fingerprint: str | None = field(default=None, repr=False)
@@ -75,6 +83,8 @@ class OAuthAccountPool:
         self._initialized = False
         self._background_task: asyncio.Task[None] | None = None
         self._usage_sessions: dict[str, CodexUsageSession] = {}
+        # 同账号自动与手动刷新共享任务，避免在会话锁前堆积无限等待者。
+        self._refresh_tasks: dict[str, asyncio.Task[dict[str, Any] | None]] = {}
         # ContextVar 让同一账户池处理并发请求时，各请求读取到自己的账户信息。
         self._request_account: ContextVar[dict[str, str] | None] = ContextVar(
             f"oauth_request_account_{id(self)}",
@@ -93,18 +103,24 @@ class OAuthAccountPool:
             self._initialized = True
             self._background_task = asyncio.create_task(self._background_loop())
             for key in self.runtimes:
-                asyncio.create_task(self.refresh_account(key))
+                self._start_account_refresh(key)
 
     async def close(self) -> None:
         """停止后台任务、额度会话和本地状态库。"""
         if self._background_task is not None:
             self._background_task.cancel()
             await asyncio.gather(self._background_task, return_exceptions=True)
+        tasks = list(self._refresh_tasks.values())
+        self._refresh_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self.login.close()
         sessions = list(self._usage_sessions.values())
         self._usage_sessions.clear()
         if sessions:
-            await asyncio.gather(*(session.close() for session in sessions), return_exceptions=True)
+            await asyncio.gather(*(self._close_usage_session(session) for session in sessions), return_exceptions=True)
         self.bindings.close()
 
     async def create_response(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -207,6 +223,48 @@ class OAuthAccountPool:
         return record
 
     async def refresh_account(self, key: str) -> dict[str, Any] | None:
+        """等待该账号的共享刷新，调用方断开不能取消其他调用方等待的任务。"""
+        return await asyncio.shield(self._start_account_refresh(key))
+
+    def _start_account_refresh(self, key: str) -> asyncio.Task[dict[str, Any] | None]:
+        """启动单账号任务；后台调度只派发，不等待整个批次完成。"""
+        task = self._refresh_tasks.get(key)
+        if task is None or task.done():
+            task = asyncio.create_task(self._refresh_account_bounded(key))
+            self._refresh_tasks[key] = task
+        return task
+
+    async def _refresh_account_bounded(self, key: str) -> dict[str, Any] | None:
+        """给完整刷新设置时限，失败后淘汰会话并保留最后成功数据。"""
+        runtime = self.runtimes.get(key)
+        if runtime is None:
+            return None
+        generation = runtime.auth_generation
+        try:
+            self._check_account_credentials(runtime)
+            generation = runtime.auth_generation
+            async with asyncio.timeout(ACCOUNT_REFRESH_TIMEOUT_SECONDS):
+                return await self._refresh_account_once(key)
+        except Exception as error:
+            if self._refresh_is_current(runtime, generation):
+                runtime.last_error = "额度读取超时，稍后自动重试" if isinstance(error, TimeoutError) else "额度读取失败"
+                runtime.next_refresh_at = time.time() + 30
+            # 不透传原始异常，避免把上游凭据或响应内容写进管理接口。
+            session = self._usage_sessions.pop(key, None)
+            if session is not None:
+                await self._close_usage_session(session)
+            return None
+
+    @staticmethod
+    async def _close_usage_session(session: CodexUsageSession) -> None:
+        """为会话清理设置独立上限，坏会话不能阻塞后续刷新或停服。"""
+        try:
+            async with asyncio.timeout(SESSION_CLEANUP_TIMEOUT_SECONDS):
+                await session.close()
+        except Exception:
+            logger.warning("额度读取会话清理失败或超时，已停止复用")
+
+    async def _refresh_account_once(self, key: str) -> dict[str, Any] | None:
         """读取指定账号额度并更新调度权重。"""
         runtime = self.runtimes.get(key)
         if runtime is None:
@@ -218,7 +276,7 @@ class OAuthAccountPool:
             session = self._usage_sessions.pop(key, None)
             runtime.reset_usage_session = False
             if session is not None:
-                await session.close()
+                await self._close_usage_session(session)
         if not credentials_ready:
             runtime.next_refresh_at = time.time() + 30
             return None
@@ -228,22 +286,15 @@ class OAuthAccountPool:
         if session is None:
             session = CodexUsageSession(account_home=self.store.auth_path(key).parent)
             self._usage_sessions[key] = session
-        try:
-            usage = await fetch_codex_usage_snapshot(
-                client_version=_codex_client_version(),
-                app_server_rpc=session.read_rate_limits,
-            )
-        except Exception:
-            if not self._refresh_is_current(runtime, generation):
-                return None
-            runtime.last_error = "额度读取失败"
-            # 保留最后一次成功快照，同时安排退避重试，避免失败时每五秒重启 app-server。
-            runtime.next_refresh_at = time.time() + 30
-            return None
+        usage = await fetch_codex_usage_snapshot(
+            client_version=_codex_client_version(),
+            app_server_rpc=session.read_rate_limits,
+        )
         # 调用失败或重新登录可能发生在额度请求期间，旧结果不能覆盖新的认证状态。
         if not self._refresh_is_current(runtime, generation):
             return None
         runtime.usage = usage
+        runtime.last_successful_refresh_at = time.time()
         runtime.status = "available" if usage.get("rateLimit", {}).get("allowed", True) else "rate_limited"
         runtime.last_error = None
         primary = self._dispatch_window(usage)
@@ -268,7 +319,7 @@ class OAuthAccountPool:
         # app-server 仍以账号目录作为 CODEX_HOME，必须先停进程再删除凭据目录。
         session = self._usage_sessions.pop(key, None)
         if session is not None:
-            await session.close()
+            await self._close_usage_session(session)
         await self.store.delete(key)
         self._rebuild_runtimes()
 
@@ -305,6 +356,14 @@ class OAuthAccountPool:
                     "weight": weights.get(record.key, 0.0),
                     "estimatedShare": weights.get(record.key, 0.0) / weight_total,
                     "nextRefreshAt": runtime.next_refresh_at if runtime else 0,
+                    "lastSuccessfulRefreshAt": runtime.last_successful_refresh_at if runtime else 0,
+                    "usageStale": (
+                        runtime is None
+                        or not runtime.last_successful_refresh_at
+                        or runtime.last_error is not None
+                        or time.time() > runtime.next_refresh_at + 30
+                    ),
+                    "usageRefreshing": record.key in self._refresh_tasks and not self._refresh_tasks[record.key].done(),
                 }
             )
         return {
@@ -441,18 +500,23 @@ class OAuthAccountPool:
         last_forced_sync = time.monotonic()
         try:
             while True:
-                await asyncio.sleep(5)
-                force_sync = time.monotonic() - last_forced_sync >= 300
-                record = await self.sync.sync_once(force=force_sync)
-                if force_sync:
-                    last_forced_sync = time.monotonic()
-                if record is not None:
-                    self._rebuild_runtimes()
-                    await self.refresh_account(record.key)
+                await asyncio.sleep(BACKGROUND_POLL_SECONDS)
+                try:
+                    force_sync = time.monotonic() - last_forced_sync >= 300
+                    async with asyncio.timeout(SYNC_TIMEOUT_SECONDS):
+                        record = await self.sync.sync_once(force=force_sync)
+                    if force_sync:
+                        last_forced_sync = time.monotonic()
+                    if record is not None:
+                        self._rebuild_runtimes()
+                        self._start_account_refresh(record.key)
+                except Exception:
+                    # 单次同步失败不能让刷新循环永久退出，也不能暴露原始认证错误。
+                    logger.warning("OAuth 登录同步失败，后台额度刷新将继续重试")
                 now = time.time()
                 due = [key for key, runtime in self.runtimes.items() if runtime.next_refresh_at <= now]
-                if due:
-                    await asyncio.gather(*(self.refresh_account(key) for key in due), return_exceptions=True)
+                for key in due:
+                    self._start_account_refresh(key)
         except asyncio.CancelledError:
             return
 

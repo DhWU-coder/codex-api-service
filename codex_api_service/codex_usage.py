@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
@@ -14,6 +15,8 @@ from typing import Any
 AppServerRpc = Callable[[str, float], Awaitable[dict[str, Any]]]
 
 APP_SERVER_TIMEOUT_SECONDS = 20.0
+APP_SERVER_CLOSE_TIMEOUT_SECONDS = 5.0
+PROCESS_EXIT_TIMEOUT_SECONDS = 2.0
 
 
 class CodexUsageFetchError(RuntimeError):
@@ -33,7 +36,15 @@ class CodexUsageSession:
         self._closed = False
 
     async def read_rate_limits(self, client_version: str, timeout: float) -> dict[str, Any]:
-        """在持久 app-server 上读取额度，失效时重启一次。"""
+        """限制整个读取过程，锁等待、初始化和管道写入也计入超时。"""
+        try:
+            async with asyncio.timeout(timeout):
+                return await self._read_rate_limits(client_version, timeout)
+        except TimeoutError as error:
+            raise CodexUsageFetchError("Codex usage status unavailable") from error
+
+    async def _read_rate_limits(self, client_version: str, timeout: float) -> dict[str, Any]:
+        """在串行会话内读取，失效时最多重启一次。"""
         async with self._lock:
             if self._closed:
                 raise CodexUsageFetchError("Codex usage status unavailable")
@@ -56,6 +67,8 @@ class CodexUsageSession:
                     )
                     return await _read_rpc_result(process, request_id, timeout)
                 except asyncio.CancelledError:
+                    # 总超时或停服取消后回收当前进程，下一次请求不能复用半截 RPC。
+                    await self._stop_locked()
                     raise
                 except Exception as error:
                     last_error = error
@@ -63,11 +76,15 @@ class CodexUsageSession:
             raise CodexUsageFetchError("Codex usage status unavailable") from last_error
 
     async def close(self) -> None:
-        """终止 app-server，并只清理本会话创建的临时 SQLite 目录。"""
-        async with self._lock:
-            if self._closed:
-                return
-            self._closed = True
+        """有界关闭会话，锁被卡住时直接终止该会话持有的进程。"""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            async with asyncio.timeout(APP_SERVER_CLOSE_TIMEOUT_SECONDS):
+                async with self._lock:
+                    await self._stop_locked()
+        except TimeoutError:
             await self._stop_locked()
 
     async def _start_locked(self, client_version: str, timeout: float) -> None:
@@ -89,6 +106,8 @@ class CodexUsageSession:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
+                # 独立进程组让 Node 启动器和原生子进程能够一起退出并关闭管道。
+                start_new_session=os.name == "posix",
                 env=environment,
             )
             request_id = self._take_request_id()
@@ -113,15 +132,17 @@ class CodexUsageSession:
         """释放子进程和临时目录；调用方必须持有会话锁。"""
         process = self._process
         self._process = None
-        if process is not None:
-            await _terminate_process(process)
         sqlite_home = self._sqlite_home
         self._sqlite_home = None
-        if sqlite_home is not None:
-            try:
-                sqlite_home.cleanup()
-            except OSError:
-                pass
+        try:
+            if process is not None:
+                await _terminate_process(process)
+        finally:
+            if sqlite_home is not None:
+                try:
+                    sqlite_home.cleanup()
+                except OSError:
+                    pass
 
     def _take_request_id(self) -> int:
         """分配当前会话内单调递增的 JSON-RPC 请求 id。"""
@@ -231,14 +252,27 @@ async def _read_rpc_result(process: asyncio.subprocess.Process, request_id: int,
 
 
 async def _terminate_process(process: asyncio.subprocess.Process) -> None:
-    """结束临时 app-server 进程，避免后台残留。"""
-    if process.returncode is None:
-        process.terminate()
+    """有界终止整组 app-server，避免子进程持有管道使 wait 永久等待。"""
+    process_group = os.name == "posix" and getattr(process, "pid", None) is not None
+    # 启动器即使已经退出，仍可能有持有管道的原生子进程留在该独立组内。
+    if process.returncode is not None and not process_group:
+        return
+    for force in (False, True):
         try:
-            await asyncio.wait_for(process.wait(), timeout=3)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+            if process_group:
+                os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+            elif force:
+                process.kill()
+            else:
+                process.terminate()
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(process.wait(), timeout=PROCESS_EXIT_TIMEOUT_SECONDS)
+            return
+        except TimeoutError:
+            # 强制退出后的等待同样有上限，不能继续拖住账号刷新。
+            continue
 
 
 def _rate_limit(value: Any) -> dict[str, Any]:

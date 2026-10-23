@@ -705,3 +705,164 @@ async def test_delete_account_stops_app_server_before_removing_auth_home(tmp_pat
     assert session.auth_existed_during_close is True
     assert not auth_path.exists()
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_timeout_isolates_bad_account_and_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证单账号读取及关闭均阻塞时，健康账号更新、批量返回且下次可恢复。"""
+    pool = make_account_pool(tmp_path, SuccessfulAccountClient())
+    good = await add_pool_account(pool, account_id="acct-healthy")
+    previous = usage_snapshot(4)
+    pool.runtimes["account-a"].usage = previous
+    pool.runtimes["account-a"].last_successful_refresh_at = 1
+    healthy_updated = asyncio.Event()
+
+    class StuckSession(FakeUsageSession):
+        """模拟永久等待的旧会话，包括异常后关闭也无法完成。"""
+
+        async def read_rate_limits(self, _version: str, _timeout: float) -> dict[str, Any]:
+            """读取永不返回，必须由账号总超时取消。"""
+            await asyncio.Event().wait()
+            return self.usage
+
+        async def close(self) -> None:
+            """清理永不返回，必须由清理超时取消。"""
+            self.close_count += 1
+            await asyncio.Event().wait()
+
+    bad_session = StuckSession(previous)
+    good_session = FakeUsageSession(usage_snapshot(75))
+    pool._usage_sessions.update({"account-a": bad_session, good.key: good_session})
+
+    async def fetch_usage(*, app_server_rpc: Any, **_kwargs: Any) -> dict[str, Any]:
+        """健康账号返回后标记事件，以验证没有等待坏账号。"""
+        usage = await app_server_rpc("test", 0.1)
+        healthy_updated.set()
+        return usage
+
+    monkeypatch.setattr(oauth_pool_module, "ACCOUNT_REFRESH_TIMEOUT_SECONDS", 0.04)
+    monkeypatch.setattr(oauth_pool_module, "SESSION_CLEANUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(oauth_pool_module, "_codex_client_version", lambda: "test")
+    monkeypatch.setattr(oauth_pool_module, "fetch_codex_usage_snapshot", fetch_usage)
+    try:
+        batch = asyncio.create_task(pool.refresh_enabled_accounts())
+        await asyncio.wait_for(healthy_updated.wait(), timeout=0.2)
+        assert not batch.done()
+        snapshot = await asyncio.wait_for(batch, timeout=0.3)
+        accounts = {item["key"]: item for item in snapshot["accounts"]}
+        assert pool.runtimes["account-a"].usage is previous
+        assert accounts["account-a"]["usageStale"]
+        assert "超时" in accounts["account-a"]["lastError"]
+        assert accounts[good.key]["lastSuccessfulRefreshAt"] > 0
+        assert not accounts[good.key]["usageStale"]
+        assert "account-a" not in pool._usage_sessions
+        assert bad_session.close_count == 1
+
+        recovered = FakeUsageSession(usage_snapshot(98))
+        monkeypatch.setattr(oauth_pool_module, "CodexUsageSession", lambda **_kwargs: recovered)
+        await pool.refresh_account("account-a")
+        account = next(item for item in pool.snapshot()["accounts"] if item["key"] == "account-a")
+        assert account["usage"]["rateLimit"]["windows"][0]["remainingPercent"] == 98
+        assert account["lastError"] is None
+        assert not account["usageStale"]
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_shares_task_and_survives_caller_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证同时刷新只读一次，某个 HTTP 调用方退出不会取消共享刷新。"""
+    pool = make_account_pool(tmp_path, SuccessfulAccountClient())
+    started, finish = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def delayed_fetch(**_kwargs: Any) -> dict[str, Any]:
+        """等待测试释放后再返回实际额度。"""
+        nonlocal calls
+        calls += 1
+        started.set()
+        await finish.wait()
+        return usage_snapshot(98)
+
+    monkeypatch.setattr(oauth_pool_module, "fetch_codex_usage_snapshot", delayed_fetch)
+    monkeypatch.setattr(oauth_pool_module, "_codex_client_version", lambda: "test")
+    first = asyncio.create_task(pool.refresh_account("account-a"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+        shared = pool._refresh_tasks["account-a"]
+        assert pool._start_account_refresh("account-a") is shared
+        assert pool.snapshot()["accounts"][0]["usageRefreshing"]
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        assert not shared.cancelled()
+        finish.set()
+        assert await pool.refresh_account("account-a") == usage_snapshot(98)
+        assert calls == 1
+    finally:
+        finish.set()
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_background_survives_sync_error_and_refreshes_independently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """验证全局同步抛错后循环仍继续，慢账号不挡住健康账号的后续调度。"""
+    pool = make_account_pool(tmp_path, SuccessfulAccountClient())
+    good = await add_pool_account(pool, account_id="acct-independent")
+    healthy_done, second_sync = asyncio.Event(), asyncio.Event()
+    sync_calls = 0
+
+    async def failing_sync(**_kwargs: Any) -> None:
+        """首轮模拟同步失败，后续记录循环仍在运行。"""
+        nonlocal sync_calls
+        sync_calls += 1
+        if sync_calls == 1:
+            raise RuntimeError("private upstream content")
+        second_sync.set()
+
+    async def fetch_usage(*, app_server_rpc: Any, **_kwargs: Any) -> dict[str, Any]:
+        """只让健康账号返回；坏账号需在停服时取消。"""
+        if app_server_rpc.__self__.usage["rateLimit"]["windows"][0]["remainingPercent"] == 4:
+            await asyncio.Event().wait()
+        healthy_done.set()
+        return usage_snapshot(75)
+
+    pool._usage_sessions["account-a"] = FakeUsageSession(usage_snapshot(4))
+    pool._usage_sessions[good.key] = FakeUsageSession(usage_snapshot(75))
+    monkeypatch.setattr(pool.sync, "sync_once", failing_sync)
+    monkeypatch.setattr(oauth_pool_module, "BACKGROUND_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(oauth_pool_module, "fetch_codex_usage_snapshot", fetch_usage)
+    monkeypatch.setattr(oauth_pool_module, "_codex_client_version", lambda: "test")
+    pool._background_task = asyncio.create_task(pool._background_loop())
+    try:
+        await asyncio.wait_for(healthy_done.wait(), timeout=0.3)
+        await asyncio.wait_for(second_sync.wait(), timeout=0.3)
+        assert not pool._background_task.done()
+        assert not pool._refresh_tasks["account-a"].done()
+        assert pool.runtimes[good.key].last_successful_refresh_at > 0
+        assert "private upstream content" not in caplog.text
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_marks_old_successful_usage_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证后台停滞时，旧快照会明确过期而不是永远看起来正常。"""
+    pool = make_account_pool(tmp_path, SuccessfulAccountClient())
+    runtime = pool.runtimes["account-a"]
+    pool._rebuild_runtimes()
+    runtime.usage = usage_snapshot(4)
+    runtime.last_successful_refresh_at = 100
+    runtime.next_refresh_at = 400
+    monkeypatch.setattr(oauth_pool_module.time, "time", lambda: 431)
+    try:
+        item = pool.snapshot()["accounts"][0]
+        assert item["usageStale"]
+        assert item["lastSuccessfulRefreshAt"] == 100
+    finally:
+        await pool.close()

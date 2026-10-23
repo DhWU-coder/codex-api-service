@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -355,3 +357,108 @@ async def test_usage_session_serializes_concurrent_reads(
         "account/rateLimits/read",
         "account/rateLimits/read",
     ]
+
+
+@pytest.mark.asyncio
+async def test_usage_session_bounds_lock_wait_and_can_close_blocked_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证会话锁永久占用时，读取和清理均可退出并回收进程。"""
+    monkeypatch.setattr(codex_usage, "APP_SERVER_CLOSE_TIMEOUT_SECONDS", 0.01)
+    session = codex_usage.CodexUsageSession(account_home=tmp_path)
+    process = FakeAppServerProcess()
+    session._process = process
+    await session._lock.acquire()
+    try:
+        async with asyncio.timeout(0.2):
+            with pytest.raises(CodexUsageFetchError):
+                await session.read_rate_limits("test", 0.01)
+            await session.close()
+        assert process.terminated
+    finally:
+        session._lock.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["write", "read"])
+async def test_usage_session_bounds_blocked_pipe_and_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
+) -> None:
+    """验证管道写入或响应阻塞后，总超时能回收进程并允许下一次重新读取。"""
+    broken, healthy = FakeAppServerProcess(), FakeAppServerProcess()
+
+    async def blocked() -> Any:
+        """模拟不返回结果的管道操作。"""
+        await asyncio.Event().wait()
+
+    if phase == "write":
+        broken.stdin.drain = blocked
+    else:
+        broken.stdout.readline = blocked
+    processes = iter([broken, healthy])
+
+    async def spawn(*_args: Any, **_kwargs: Any) -> FakeAppServerProcess:
+        """第一次返回阻塞会话，第二次返回健康会话。"""
+        return next(processes)
+
+    monkeypatch.setattr(codex_usage.asyncio, "create_subprocess_exec", spawn)
+    session = codex_usage.CodexUsageSession(account_home=tmp_path)
+    async with asyncio.timeout(0.5):
+        with pytest.raises(CodexUsageFetchError):
+            await session.read_rate_limits("test", 0.01)
+        result = await session.read_rate_limits("test", 0.1)
+        await session.close()
+    assert broken.terminated
+    assert result["rateLimits"]["planType"] == "pro"
+
+
+@pytest.mark.asyncio
+async def test_usage_process_cleanup_bounds_wait_after_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证发送强杀后管道仍未关闭时，清理也不会无限等待。"""
+    monkeypatch.setattr(codex_usage, "PROCESS_EXIT_TIMEOUT_SECONDS", 0.01)
+    process = FakeAppServerProcess()
+    killed = False
+
+    async def never_exits() -> int:
+        """模拟持有未关闭管道的启动器。"""
+        await asyncio.Event().wait()
+        return 0
+
+    def record_kill() -> None:
+        """记录正常终止失败后的强制终止。"""
+        nonlocal killed
+        killed = True
+
+    process.wait = never_exits
+    process.kill = record_kill
+    async with asyncio.timeout(0.2):
+        await codex_usage._terminate_process(process)
+    assert killed
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="仅验证支持进程组的系统")
+async def test_usage_cleanup_terminates_launcher_and_child_pipe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """用真实进程复现启动器和子进程共享管道，确认强杀整组后读到 EOF。"""
+    monkeypatch.setattr(codex_usage, "PROCESS_EXIT_TIMEOUT_SECONDS", 0.05)
+    child_code = "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print('ready',flush=True); time.sleep(60)"
+    launcher_code = (
+        "import signal,subprocess,sys; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+        f"subprocess.Popen([sys.executable,'-c',{child_code!r}]).wait()"
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", launcher_code,
+        stdout=asyncio.subprocess.PIPE, start_new_session=True,
+    )
+    try:
+        assert await asyncio.wait_for(process.stdout.readline(), timeout=2) == b"ready\n"
+        await asyncio.wait_for(codex_usage._terminate_process(process), timeout=1)
+        assert await asyncio.wait_for(process.stdout.read(), timeout=1) == b""
+        assert process.returncode is not None
+    finally:
+        # 测试失败也只回收自己创建的独立进程组。
+        try:
+            os.killpg(process.pid, codex_usage.signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await asyncio.wait_for(process.wait(), timeout=1)

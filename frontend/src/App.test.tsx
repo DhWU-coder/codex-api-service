@@ -126,7 +126,10 @@ const oauthAccountsStatus = {
       usage: codexUsageStatus,
       weight: 0.00338,
       estimatedShare: 1,
-      nextRefreshAt: 1783815000
+      nextRefreshAt: 1783815000,
+      lastSuccessfulRefreshAt: 1783814500,
+      usageStale: false,
+      usageRefreshing: false
     }
   ],
   dispatchMode: "multi",
@@ -634,6 +637,37 @@ describe("App theme mode", () => {
     expect(screen.queryByText("3.38e-3")).toBeNull();
     expect(await screen.findByText("5h 重置")).toBeTruthy();
     expect(await screen.findByText(new Date(1783814968 * 1000).toLocaleString())).toBeTruthy();
+  });
+
+  it("forces quota refresh from the OAuth account page and replaces stale data", async () => {
+    // 账号页按钮必须查询上游，并用成功返回的时间和额度替换旧缓存。
+    oauthAccountsResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({ ...account, usageStale: true }))
+    };
+    oauthAccountsRefreshResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({
+        ...account,
+        lastSuccessfulRefreshAt: 1783814600,
+        usage: {
+          ...codexUsageStatus,
+          rateLimit: {
+            ...codexUsageStatus.rateLimit,
+            windows: [{ ...codexUsageStatus.rateLimit.windows[0], remainingPercent: 98, usedPercent: 2 }]
+          }
+        }
+      }))
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    expect(await screen.findByText("数据已过期")).toBeTruthy();
+    expect(screen.getByText(`额度更新：${new Date(1783814500 * 1000).toLocaleString()}`)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    await waitFor(() => expect(screen.queryByText("数据已过期")).toBeNull());
+    expect(screen.getByText(`额度更新：${new Date(1783814600 * 1000).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "账号 A 5h 剩余额度" }).getAttribute("aria-valuenow")).toBe("98");
+    expect(capturedRequests.some((request) => request.url === "/admin/oauth/accounts/refresh" && request.method === "POST")).toBe(true);
   });
 
   it("separates current concurrency from the unlimited limit", async () => {
