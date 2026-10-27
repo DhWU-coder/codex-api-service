@@ -126,6 +126,10 @@ function AccountAuthorizations({ account }: { account: OAuthAccountSnapshot }) {
 // 没有目录元数据时保留旧四档，保证配置兜底仍可编辑。
 const DEFAULT_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"];
 
+// 自定义倍率与后端使用相同安全范围，避免极端数值影响调度精度。
+const MIN_WEIGHT_MULTIPLIER = 0.000001;
+const MAX_WEIGHT_MULTIPLIER = 1000000;
+
 // API Service 用量看板支持的时间范围，顺序和页面分段控件一致。
 const DASHBOARD_RANGE_OPTIONS: Array<{ value: DashboardRangePreset; label: string }> = [
   { value: "today", label: "今日" },
@@ -147,11 +151,12 @@ type ConfigFormState = {
 };
 
 type AccountEditorState = {
-  mode: "rename" | "concurrency";
+  mode: "rename" | "concurrency" | "weight";
   account: OAuthAccountSnapshot;
   alias: string;
   concurrencyMode: "unlimited" | "limited";
   maxConcurrency: string;
+  weightMultiplier: string;
   saving: boolean;
   error: string;
 };
@@ -546,6 +551,10 @@ function formatResetTime(timestamp: number): string {
 
 function formatDisplayWeight(weight: number): string {
   // 把调度权重放大一千倍，并用普通十进制展示。
+  if (weight > 0 && weight * 1000 < 0.0001) {
+    // 极低的自定义倍率仍有非零权重，不能四舍五入后误显示为已停用。
+    return (weight * 1000).toExponential(2);
+  }
   return new Intl.NumberFormat("zh-CN", {
     maximumFractionDigits: 4,
     useGrouping: false
@@ -1013,7 +1022,7 @@ export function App() {
     if (!accountEditor || accountEditor.saving) {
       return;
     }
-    let patch: { alias: string } | { maxConcurrency: number | null };
+    let patch: { alias: string } | { maxConcurrency: number | null } | { weightMultiplier: number };
     if (accountEditor.mode === "rename") {
       const alias = accountEditor.alias.trim();
       if (!alias) {
@@ -1021,6 +1030,13 @@ export function App() {
         return;
       }
       patch = { alias };
+    } else if (accountEditor.mode === "weight") {
+      const multiplier = Number(accountEditor.weightMultiplier);
+      if (!Number.isFinite(multiplier) || multiplier < MIN_WEIGHT_MULTIPLIER || multiplier > MAX_WEIGHT_MULTIPLIER) {
+        setAccountEditor({ ...accountEditor, error: "权重倍率必须是 0.000001 至 1000000 之间的数字" });
+        return;
+      }
+      patch = { weightMultiplier: multiplier };
     } else if (accountEditor.concurrencyMode === "unlimited") {
       patch = { maxConcurrency: null };
     } else {
@@ -2238,6 +2254,7 @@ export function App() {
                     <div className="oauth-account-metrics">
                       <span><span className="metric-label">并发上限</span><strong>{account.maxConcurrency ?? "不限制"}</strong></span>
                       <span><span className="metric-label">权重</span><strong>{formatDisplayWeight(account.weight)}</strong></span>
+                      <span><span className="metric-label">权重倍率</span><strong>{account.weightMultiplier ?? 1}×</strong></span>
                       <span><span className="metric-label">预计占比</span><strong>{Math.round(account.estimatedShare * 100)}%</strong></span>
                       <span><span className="metric-label">{primaryWindow?.label || "额度"} 剩余</span><strong>{primaryWindow?.remainingPercent ?? "-"}%</strong></span>
                       <span><span className="metric-label">{primaryWindow?.label || "额度"} 重置</span><strong>{formatResetTime(primaryWindow?.resetAt || 0)}</strong></span>
@@ -2272,6 +2289,7 @@ export function App() {
                           alias: account.alias,
                           concurrencyMode: account.maxConcurrency == null ? "unlimited" : "limited",
                           maxConcurrency: account.maxConcurrency?.toString() || "",
+                          weightMultiplier: String(account.weightMultiplier ?? 1),
                           saving: false,
                           error: ""
                         })}
@@ -2284,10 +2302,24 @@ export function App() {
                           alias: account.alias,
                           concurrencyMode: account.maxConcurrency == null ? "unlimited" : "limited",
                           maxConcurrency: account.maxConcurrency?.toString() || "1",
+                          weightMultiplier: String(account.weightMultiplier ?? 1),
                           saving: false,
                           error: ""
                         })}
                       >并发设置</button>
+                      <button
+                        className="secondary-button"
+                        onClick={() => setAccountEditor({
+                          mode: "weight",
+                          account,
+                          alias: account.alias,
+                          concurrencyMode: account.maxConcurrency == null ? "unlimited" : "limited",
+                          maxConcurrency: account.maxConcurrency?.toString() || "1",
+                          weightMultiplier: String(account.weightMultiplier ?? 1),
+                          saving: false,
+                          error: ""
+                        })}
+                      >权重设置</button>
                       <button
                         className="secondary-button"
                         disabled={cannotDisable && account.enabled}
@@ -2768,7 +2800,7 @@ export function App() {
               <div>
                 <span className="account-modal-eyebrow">{accountEditor.account.alias}</span>
                 <h2 id="account-modal-title">
-                  {accountEditor.mode === "rename" ? "重命名 OAuth 账号" : "设置账号并发"}
+                  {accountEditor.mode === "rename" ? "重命名 OAuth 账号" : accountEditor.mode === "weight" ? "设置账号权重倍率" : "设置账号并发"}
                 </h2>
               </div>
               <button
@@ -2795,6 +2827,46 @@ export function App() {
                   />
                   <small>用于控制台展示，不会改变 OAuth 账号身份。</small>
                 </label>
+              ) : accountEditor.mode === "weight" ? (
+                <div className="account-weight-options">
+                  <label className="account-modal-field">
+                    <span>自定义倍率</span>
+                    <input
+                      autoFocus
+                      aria-label="自定义倍率"
+                      aria-describedby="account-weight-help"
+                      type="number"
+                      min={MIN_WEIGHT_MULTIPLIER}
+                      max={MAX_WEIGHT_MULTIPLIER}
+                      step="any"
+                      required
+                      disabled={accountEditor.saving}
+                      value={accountEditor.weightMultiplier}
+                      onFocus={(event) => event.currentTarget.select()}
+                      onChange={(event) => setAccountEditor({ ...accountEditor, weightMultiplier: event.target.value, error: "" })}
+                    />
+                    <small id="account-weight-help">支持 0.000001 至 1000000 之间的自定义小数，例如 0.3、1.25、7.5。</small>
+                  </label>
+                  <div className="account-weight-presets" aria-label="快捷倍率">
+                    {[0.5, 2, 5].map((multiplier) => (
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        key={multiplier}
+                        aria-pressed={Number(accountEditor.weightMultiplier) === multiplier}
+                        disabled={accountEditor.saving}
+                        onClick={() => setAccountEditor({ ...accountEditor, weightMultiplier: String(multiplier), error: "" })}
+                      >{multiplier}×</button>
+                    ))}
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      disabled={accountEditor.saving}
+                      onClick={() => setAccountEditor({ ...accountEditor, weightMultiplier: "1", error: "" })}
+                    >恢复默认（1×）</button>
+                  </div>
+                  <p className="account-weight-hint">最终权重 = 自动权重 × 倍率。保存后立即生效，但不是固定请求占比；账号仍须通过登录、额度和并发检查。如需停止分配，请停用账号。</p>
+                </div>
               ) : (
                 <div className="account-concurrency-options">
                   <label className={accountEditor.concurrencyMode === "unlimited" ? "selected" : ""}>

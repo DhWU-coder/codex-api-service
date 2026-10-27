@@ -1,5 +1,7 @@
 import asyncio
 import time
+from collections import Counter
+from dataclasses import replace
 
 import pytest
 
@@ -13,6 +15,7 @@ def candidate(
     remaining: float = 50,
     reset_minutes: float = 60,
     max_concurrency: int | None = None,
+    weight_multiplier: float = 1,
 ) -> AccountCandidate:
     """构造可调度账号。"""
     now = 1_000_000.0
@@ -22,6 +25,7 @@ def candidate(
         remaining_percent=remaining,
         resets_at=now + reset_minutes * 60,
         max_concurrency=max_concurrency,
+        weight_multiplier=weight_multiplier,
     )
 
 
@@ -116,3 +120,58 @@ async def test_waiting_request_fails_when_last_account_loses_authorization() -> 
     with pytest.raises(NoAvailableOAuthAccounts):
         await asyncio.wait_for(waiting, timeout=1)
     assert scheduler.active_snapshot()[0] == scheduler.active_snapshot()[2] == 0
+
+
+@pytest.mark.parametrize("multiplier", [0.000001, 0.3, 1, 1.25, 7.5, 1_000_000])
+def test_dispatch_weight_applies_custom_multiplier(multiplier: float) -> None:
+    """验证倍率只乘在原公式上，默认 1 倍完全兼容。"""
+    original = account_dispatch_weight(candidate("original"), now=1_000_000)
+    adjusted = account_dispatch_weight(candidate("adjusted", weight_multiplier=multiplier), now=1_000_000)
+    assert adjusted == pytest.approx(original * multiplier, rel=1e-12, abs=0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("multiplier", "requests", "expected"), [(0.3, 130, 30), (1.25, 90, 50), (7.5, 170, 150)])
+async def test_custom_multiplier_changes_actual_dispatch_proportions(multiplier: float, requests: int, expected: int) -> None:
+    """验证实际轮询比例随自定义小数变化，而不是只改页面数字。"""
+    scheduler = OAuthScheduler(global_max=None, clock=lambda: 1_000_000)
+    scheduler.update_accounts([candidate("custom", weight_multiplier=multiplier), candidate("default")])
+    counts: Counter[str] = Counter()
+    for _ in range(requests):
+        lease = await scheduler.acquire()
+        counts[lease.account_key] += 1
+        await lease.release()
+    assert counts["custom"] == expected
+    assert counts["default"] == requests - expected
+    assert scheduler.active_snapshot()[0] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["login_required", "auth_error", "rate_limited", "disabled"])
+async def test_high_multiplier_never_bypasses_unavailable_account(status: str) -> None:
+    """验证高倍率不绕过失效、停用或限流状态。"""
+    scheduler = OAuthScheduler(global_max=None, clock=lambda: 1_000_000)
+    blocked = replace(candidate("blocked", weight_multiplier=1_000_000),
+                      status="available" if status == "disabled" else status, enabled=status != "disabled")
+    scheduler.update_accounts([blocked, candidate("healthy", weight_multiplier=0.000001)])
+    lease = await scheduler.acquire()
+    assert lease.account_key == "healthy"
+    await lease.release()
+
+
+@pytest.mark.asyncio
+async def test_multiplier_change_resets_scores_but_keeps_active_slots_and_binding() -> None:
+    """验证倍率修改立即清除旧累积分数，但不改变在途计数及绑定账号。"""
+    scheduler = OAuthScheduler(global_max=2, clock=lambda: 1_000_000)
+    first, second = candidate("a"), candidate("b", weight_multiplier=1_000_000)
+    scheduler.update_accounts([first, second])
+    lease = await scheduler.acquire(bound_account_key="a")
+    scheduler._smooth_current = {"a": 500, "b": -500}
+    scheduler.update_accounts([replace(first, weight_multiplier=0.000001), second])
+    assert scheduler._smooth_current == {"a": 0, "b": 0}
+    assert scheduler.active_snapshot()[0] == 1
+    bound = await scheduler.acquire(bound_account_key="a")
+    assert bound.account_key == "a"
+    await bound.release()
+    await lease.release()
+    assert scheduler.active_snapshot()[0] == 0

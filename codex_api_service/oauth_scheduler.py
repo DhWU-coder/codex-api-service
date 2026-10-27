@@ -23,6 +23,7 @@ class AccountCandidate:
     enabled: bool = True
     status: str = "available"
     max_concurrency: int | None = None
+    weight_multiplier: float = 1.0
 
 
 class BoundAccountUnavailable(RuntimeError):
@@ -45,12 +46,12 @@ class NoAvailableOAuthAccounts(RuntimeError):
 
 
 def account_dispatch_weight(account: AccountCandidate, *, now: float | None = None) -> float:
-    """按套餐、5 小时剩余比例和重置分钟数计算账号权重。"""
+    """自动额度权重乘以账号自定义倍率，不改变可用性和并发限制。"""
     current = time.time() if now is None else now
     plan_factor = PLAN_FACTORS.get(account.plan_type.strip().lower(), 0.05)
     remaining_ratio = max(float(account.remaining_percent) / 100.0, 0.001)
     reset_minutes = max((float(account.resets_at) - current) / 60.0, 1.0)
-    return plan_factor * remaining_ratio / reset_minutes
+    return plan_factor * remaining_ratio / reset_minutes * account.weight_multiplier
 
 
 class AccountLease:
@@ -97,9 +98,17 @@ class OAuthScheduler:
 
     def update_accounts(self, accounts: list[AccountCandidate]) -> None:
         """替换调度账号快照，同时保留仍存在账号的累计权重和计数。"""
+        multiplier_changed = any(
+            item.key in self._accounts and item.weight_multiplier != self._accounts[item.key].weight_multiplier
+            for item in accounts
+        )
         self._accounts = {item.key: item for item in accounts}
         self._account_active = {key: self._account_active.get(key, 0) for key in self._accounts}
-        self._smooth_current = {key: self._smooth_current.get(key, 0.0) for key in self._accounts}
+        # 手动调整立即以新比例开始，不让旧累计分数拖延；在途请求和槽位计数保持不变。
+        self._smooth_current = {
+            key: 0.0 if multiplier_changed else self._smooth_current.get(key, 0.0)
+            for key in self._accounts
+        }
 
     def active_snapshot(self) -> tuple[int, dict[str, int], int]:
         """返回当前全局并发、账号并发和等待队列计数。"""

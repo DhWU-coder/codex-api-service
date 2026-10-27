@@ -143,6 +143,8 @@ export type OAuthAccountSnapshot = {
   lastError: string | null;
   usage: CodexUsageSnapshot | null;
   weight: number;
+  // 旧后端缺少倍率时保持默认 1 倍，不改变原有自动调度。
+  weightMultiplier?: number;
   estimatedShare: number;
   nextRefreshAt: number;
   // 兼容旧后端；缺少成功时间时不把缓存误认为刚刚刷新。

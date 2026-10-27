@@ -2499,3 +2499,26 @@ th {
 .oauth-authorization-item strong {
   margin-right: 6px;
 }
+
+/* 自定义倍率保留自由输入，快捷项只辅助选择，不限定可填值。 */
+.account-weight-options {
+  display: grid;
+  gap: 16px;
+}
+
+.account-weight-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.account-weight-presets button[aria-pressed="true"] {
+  border-color: var(--primary-bg);
+}
+
+.account-weight-hint {
+  margin: 0;
+  color: var(--page-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}

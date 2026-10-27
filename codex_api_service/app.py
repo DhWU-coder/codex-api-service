@@ -530,7 +530,7 @@ def create_app(
 
     @app.patch("/admin/oauth/accounts/{account_key}")
     async def admin_oauth_account_patch(account_key: str, request: Request) -> dict[str, Any]:
-        """更新账号别名、启停状态或账号并发上限。"""
+        """更新账号别名、启停状态、并发上限或权重倍率。"""
         _require_local_auth(request, app_config)
         if account_pool is None:
             raise HTTPException(status_code=409, detail="Multi OAuth account pool is unavailable")
@@ -541,6 +541,7 @@ def create_app(
                 alias=body.get("alias") if "alias" in body else None,
                 enabled=body.get("enabled") if "enabled" in body else None,
                 max_concurrency=body.get("maxConcurrency", ...) if "maxConcurrency" in body else ...,
+                weight_multiplier=body.get("weightMultiplier") if "weightMultiplier" in body else ...,
             )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="OAuth account not found") from error

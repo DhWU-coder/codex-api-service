@@ -7,15 +7,34 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import os
 import shutil
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from .auth import CodexCredentials, _credentials_from_auth_payload, _parse_auth_file
 from .oauth_credentials import AccountAuthorizations, atomic_json_write
+
+
+MIN_WEIGHT_MULTIPLIER = 0.000001
+MAX_WEIGHT_MULTIPLIER = 1_000_000
+
+
+def _validated_weight_multiplier(value: Any) -> float:
+    """仅接受安全范围内的有限正数，避免极端倍率破坏浮点调度。"""
+    message = "权重倍率必须是 0.000001 至 1000000 之间的数字"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(message)
+    try:
+        multiplier = float(value)
+    except (OverflowError, ValueError) as error:
+        raise ValueError(message) from error
+    if not math.isfinite(multiplier) or not MIN_WEIGHT_MULTIPLIER <= multiplier <= MAX_WEIGHT_MULTIPLIER:
+        raise ValueError(message)
+    return multiplier
 
 
 def _identity_alias(id_token: str | None) -> str | None:
@@ -48,6 +67,7 @@ class OAuthAccountRecord:
     enabled: bool = True
     source: str = "unknown"
     max_concurrency: int | None = None
+    weight_multiplier: float = 1.0
 
 
 class OAuthAccountStore:
@@ -173,6 +193,7 @@ class OAuthAccountStore:
                     enabled=existing.enabled if existing else self.dispatch_mode == "multi",
                     source=selected.source if selected and selected.source != "legacy" else source,
                     max_concurrency=existing.max_concurrency if existing else None,
+                    weight_multiplier=existing.weight_multiplier if existing else 1.0,
                 )
                 self._records[key] = record
                 self._save_registry()
@@ -185,6 +206,7 @@ class OAuthAccountStore:
         alias: str | None = None,
         enabled: bool | None = None,
         max_concurrency: int | None | object = ...,
+        weight_multiplier: float | object = ...,
     ) -> OAuthAccountRecord:
         """更新账号的非敏感管理字段。"""
         async with self._registry_lock:
@@ -194,18 +216,14 @@ class OAuthAccountStore:
             next_limit = current.max_concurrency if max_concurrency is ... else max_concurrency
             if next_limit is not None and (not isinstance(next_limit, int) or isinstance(next_limit, bool) or next_limit <= 0):
                 raise ValueError("max_concurrency must be empty or a positive integer")
+            # 先验证所有输入，再改变启停状态，避免非法倍率造成部分设置已保存。
+            next_multiplier = current.weight_multiplier if weight_multiplier is ... else _validated_weight_multiplier(weight_multiplier)
             if enabled is not None:
                 if self.dispatch_mode == "single" and enabled:
                     # 单账户模式启用另一账号等同于切换唯一调度账号。
                     self.single_account_key = key
                     self._records = {
-                        record_key: OAuthAccountRecord(
-                            key=record.key,
-                            alias=record.alias,
-                            enabled=record_key == key,
-                            source=record.source,
-                            max_concurrency=record.max_concurrency,
-                        )
+                        record_key: replace(record, enabled=record_key == key)
                         for record_key, record in self._records.items()
                     }
                     current = self._records[key]
@@ -215,12 +233,12 @@ class OAuthAccountStore:
                     enabled_count = sum(1 for item in self._records.values() if item.enabled)
                     if current.enabled and enabled_count <= 1:
                         raise ValueError("multi account mode requires at least one enabled account")
-            record = OAuthAccountRecord(
-                key=current.key,
+            record = replace(
+                current,
                 alias=(alias.strip() if alias is not None else current.alias) or current.alias,
                 enabled=current.enabled if enabled is None else enabled,
-                source=current.source,
                 max_concurrency=next_limit,
+                weight_multiplier=next_multiplier,
             )
             self._records[key] = record
             self._save_registry()
@@ -252,13 +270,7 @@ class OAuthAccountStore:
             self.dispatch_mode = normalized_mode
             self.single_account_key = single_account_key if normalized_mode == "single" else None
             self._records = {
-                key: OAuthAccountRecord(
-                    key=record.key,
-                    alias=record.alias,
-                    enabled=key in selected_keys,
-                    source=record.source,
-                    max_concurrency=record.max_concurrency,
-                )
+                key: replace(record, enabled=key in selected_keys)
                 for key, record in self._records.items()
             }
             self._save_registry()
@@ -303,12 +315,18 @@ class OAuthAccountStore:
             if not isinstance(item, dict) or not isinstance(item.get("key"), str):
                 continue
             try:
+                multiplier = _validated_weight_multiplier(item.get("weight_multiplier", 1.0))
+            except ValueError:
+                # 旧数据或手工写坏的倍率不能令账号消失，安全回退为默认自动权重。
+                multiplier = 1.0
+            try:
                 record = OAuthAccountRecord(
                     key=item["key"],
                     alias=str(item.get("alias") or item["key"]),
                     enabled=bool(item.get("enabled", True)),
                     source=str(item.get("source") or "unknown"),
                     max_concurrency=item.get("max_concurrency"),
+                    weight_multiplier=multiplier,
                 )
             except (TypeError, ValueError):
                 continue
@@ -318,13 +336,7 @@ class OAuthAccountStore:
                 credentials = _parse_auth_file(self.auth_path(record.key))
                 identity_alias = _identity_alias(credentials.id_token) if credentials else None
                 if identity_alias:
-                    record = OAuthAccountRecord(
-                        key=record.key,
-                        alias=identity_alias,
-                        enabled=record.enabled,
-                        source=record.source,
-                        max_concurrency=record.max_concurrency,
-                    )
+                    record = replace(record, alias=identity_alias)
                     registry_changed = True
             self._records[record.key] = record
         if registry_changed:

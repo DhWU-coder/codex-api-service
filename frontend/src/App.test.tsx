@@ -925,6 +925,86 @@ describe("App theme mode", () => {
     });
   });
 
+  it.each([0.3, 1.25, 7.5])("saves a custom account multiplier of %s and displays the returned value", async (multiplier) => {
+    // 不在快捷项中的小数也能保存，并使用后端返回的有效倍率更新卡片。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    expect(await screen.findByText("1×", { selector: "strong" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "权重设置" }));
+    expect(await screen.findByRole("dialog", { name: "设置账号权重倍率" })).toBeTruthy();
+    const input = screen.getByRole("spinbutton", { name: "自定义倍率" }) as HTMLInputElement;
+    expect(input.step).toBe("any");
+    expect(input.value).toBe("1");
+    fireEvent.change(input, { target: { value: String(multiplier) } });
+    oauthAccountsResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({ ...account, weightMultiplier: multiplier }))
+    };
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(capturedRequests).toContainEqual({
+      url: "/admin/oauth/accounts/account-a", method: "PATCH", body: { weightMultiplier: multiplier }
+    }));
+    expect(await screen.findByText(`${multiplier}×`, { selector: "strong" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "设置账号权重倍率" })).toBeNull();
+  });
+
+  it("loads the persisted custom multiplier and can restore the default", async () => {
+    // 重新打开弹窗时展示已保存值，恢复默认始终发送数值 1。
+    oauthAccountsResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({ ...account, weightMultiplier: 7.5 }))
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    fireEvent.click(await screen.findByRole("button", { name: "权重设置" }));
+    const input = await screen.findByRole("spinbutton", { name: "自定义倍率" }) as HTMLInputElement;
+    expect(input.value).toBe("7.5");
+    fireEvent.click(screen.getByRole("button", { name: "恢复默认（1×）" }));
+    expect(input.value).toBe("1");
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(capturedRequests).toContainEqual({
+      url: "/admin/oauth/accounts/account-a", method: "PATCH", body: { weightMultiplier: 1 }
+    }));
+  });
+
+  it("allows a shortcut without submitting until save is clicked", async () => {
+    // 快捷选择只是填写输入框，仍允许之后改成其他自定义值。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    fireEvent.click(await screen.findByRole("button", { name: "权重设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "2×" }));
+    expect((screen.getByRole("spinbutton", { name: "自定义倍率" }) as HTMLInputElement).value).toBe("2");
+    expect(capturedRequests.some((request) => request.method === "PATCH")).toBe(false);
+    fireEvent.change(screen.getByRole("spinbutton", { name: "自定义倍率" }), { target: { value: "2.75" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(capturedRequests).toContainEqual({
+      url: "/admin/oauth/accounts/account-a", method: "PATCH", body: { weightMultiplier: 2.75 }
+    }));
+  });
+
+  it.each(["", "0", "-1", "0.0000001", "1000001"])("rejects an invalid custom multiplier of '%s'", async (value) => {
+    // 即使绕过原生表单约束，组件校验也不能把非法倍率提交给后端。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    fireEvent.click(await screen.findByRole("button", { name: "权重设置" }));
+    fireEvent.change(await screen.findByRole("spinbutton", { name: "自定义倍率" }), { target: { value } });
+    fireEvent.submit(screen.getByRole("dialog", { name: "设置账号权重倍率" }));
+    expect(await screen.findByText("权重倍率必须是 0.000001 至 1000000 之间的数字")).toBeTruthy();
+    expect(capturedRequests.some((request) => request.method === "PATCH")).toBe(false);
+  });
+
+  it("keeps a very small nonzero dispatch weight visible", async () => {
+    // 极小倍率下仍显示非零有效权重，避免误以为账号已经被停用。
+    oauthAccountsResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({ ...account, weight: 1e-10, weightMultiplier: 0.000001 }))
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    expect(await screen.findByText("1.00e-7")).toBeTruthy();
+    expect(screen.getByText("0.000001×", { selector: "strong" })).toBeTruthy();
+  });
+
   it("keeps only default model on the ordinary config page", async () => {
     // 服务配置页不再展示全局 effort 和快速模式。
     render(<App />);

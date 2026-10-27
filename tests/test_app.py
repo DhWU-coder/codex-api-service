@@ -1399,6 +1399,55 @@ async def test_admin_oauth_dispatch_updates_mode_and_snapshot(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("multiplier", [0.000001, 0.3, 1.25, 7.5, 1_000_000])
+async def test_admin_oauth_custom_weight_updates_snapshot_and_scheduler(tmp_path: Path, multiplier: float) -> None:
+    """验证管理接口保存自定义倍率，立即同步真实调度候选及返回值。"""
+    app = create_app(config=make_test_config(tmp_path))
+    pool = app.state.oauth_account_pool
+    pool._initialized = True
+    record = await pool.store.import_credentials(
+        CodexCredentials("access", "refresh", 4_102_444_800_000, "weighted-account"), source="web-oauth",
+    )
+    pool._rebuild_runtimes()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.patch(f"/admin/oauth/accounts/{record.key}", json={"weightMultiplier": multiplier})
+            snapshot = await client.get("/admin/oauth/accounts")
+        assert response.status_code == 200
+        assert response.json()["accounts"][0]["weightMultiplier"] == multiplier
+        assert snapshot.json()["accounts"][0]["weightMultiplier"] == multiplier
+        assert pool.scheduler._accounts[record.key].weight_multiplier == multiplier
+        assert pool.store.get(record.key).weight_multiplier == multiplier
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_value", ["null", "true", '"2"', "0", "-1", "0.0000001", "1000001", "NaN", "Infinity"])
+async def test_admin_oauth_rejects_invalid_custom_multiplier(tmp_path: Path, raw_value: str) -> None:
+    """验证请求中非法倍率返回明确错误，而不是静默忽略或保存非有限值。"""
+    app = create_app(config=make_test_config(tmp_path))
+    pool = app.state.oauth_account_pool
+    pool._initialized = True
+    record = await pool.store.import_credentials(
+        CodexCredentials("access", "refresh", 4_102_444_800_000, "weighted-account"), source="web-oauth",
+    )
+    pool._rebuild_runtimes()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.patch(
+                f"/admin/oauth/accounts/{record.key}", content='{"weightMultiplier":' + raw_value + '}',
+                headers={"Content-Type": "application/json"},
+            )
+        assert response.status_code == 409
+        assert "权重倍率" in response.json()["error"]["message"]
+        assert pool.store.get(record.key).weight_multiplier == 1
+        assert pool.scheduler._accounts[record.key].weight_multiplier == 1
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_admin_oauth_login_active_and_repeated_start_reuse_session(tmp_path: Path) -> None:
     """验证页面可恢复活动登录，重复启动会接管同一后端会话。"""
     app = create_app(config=make_test_config(tmp_path))

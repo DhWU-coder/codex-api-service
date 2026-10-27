@@ -866,3 +866,28 @@ async def test_snapshot_marks_old_successful_usage_stale(tmp_path: Path, monkeyp
         assert item["lastSuccessfulRefreshAt"] == 100
     finally:
         await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_estimated_share_uses_custom_multiplier_and_keeps_unavailable_weight_zero(tmp_path: Path) -> None:
+    """验证页面预计占比采用实际倍率，失效、限流或停用账号仍以零权重展示。"""
+    pool = make_account_pool(tmp_path, SuccessfulAccountClient())
+    other = await add_pool_account(pool, "other-weighted")
+    pool.runtimes["account-a"].usage = usage_snapshot(50)
+    pool.runtimes[other.key].usage = usage_snapshot(50)
+    try:
+        await pool.store.update("account-a", weight_multiplier=2.5)
+        accounts = {item["key"]: item for item in pool.snapshot()["accounts"]}
+        assert accounts["account-a"]["weightMultiplier"] == 2.5
+        assert accounts["account-a"]["weight"] == pytest.approx(accounts[other.key]["weight"] * 2.5)
+        assert accounts["account-a"]["estimatedShare"] == pytest.approx(2.5 / 3.5)
+        pool.runtimes["account-a"].status = "rate_limited"
+        accounts = {item["key"]: item for item in pool.snapshot()["accounts"]}
+        assert accounts["account-a"]["weight"] == accounts["account-a"]["estimatedShare"] == 0
+        assert accounts[other.key]["estimatedShare"] == 1
+        await pool.store.update("account-a", enabled=False)
+        accounts = {item["key"]: item for item in pool.snapshot()["accounts"]}
+        assert accounts["account-a"]["weightMultiplier"] == 2.5
+        assert accounts["account-a"]["weight"] == 0
+    finally:
+        await pool.close()

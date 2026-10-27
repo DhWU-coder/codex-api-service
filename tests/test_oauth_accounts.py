@@ -192,3 +192,74 @@ async def test_import_auth_file_preserves_codex_native_metadata(tmp_path: Path) 
 
     assert saved["last_refresh"] == "2026-07-12T02:44:43Z"
     assert "OPENAI_API_KEY" in saved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multiplier", [0.000001, 0.3, 1.25, 7.5, 1_000_000])
+async def test_custom_weight_multiplier_survives_restart_and_account_updates(tmp_path: Path, multiplier: float) -> None:
+    """验证自定义小数及边界值保存后可重启恢复，管理和授权更新不清空倍率。"""
+    store = OAuthAccountStore(tmp_path)
+    account = await store.import_credentials(credentials("weighted", "web-old"), source="web-oauth")
+    other = await store.import_credentials(credentials("other", "other-web"), source="web-oauth")
+    assert account.weight_multiplier == 1
+    await store.update(account.key, weight_multiplier=multiplier)
+    await store.update(account.key, alias="自定义账号", max_concurrency=3)
+    await store.import_credentials(credentials("weighted", "cli-new"), source="codex-cli")
+    await store.set_dispatch(mode="single", single_account_key=other.key)
+    await store.update(account.key, enabled=True)
+    await store.set_dispatch(mode="multi", enabled_account_keys={account.key, other.key})
+    await store.update(account.key, enabled=False)
+    await store.update(account.key, enabled=True)
+    restarted = OAuthAccountStore(tmp_path)
+    restored = restarted.get(account.key)
+    assert restored.weight_multiplier == multiplier
+    assert restored.alias == "自定义账号"
+    assert restored.max_concurrency == 3
+    assert restored.enabled
+    await restarted.update(account.key, weight_multiplier=1)
+    assert OAuthAccountStore(tmp_path).get(account.key).weight_multiplier == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [None, True, False, "2", 0, -1, 0.0000001, 1_000_001, float("nan"), float("inf"), [], {}, 10 ** 1000])
+async def test_invalid_multiplier_does_not_partially_change_dispatch(tmp_path: Path, invalid: object) -> None:
+    """验证非法输入不会让单账号启停状态或原倍率发生部分变更。"""
+    store = OAuthAccountStore(tmp_path)
+    first = await store.import_credentials(credentials("first", "first-web"), source="web-oauth")
+    second = await store.import_credentials(credentials("second", "second-web"), source="web-oauth")
+    await store.set_dispatch(mode="single", single_account_key=first.key)
+    with pytest.raises(ValueError, match="权重倍率"):
+        await store.update(second.key, enabled=True, weight_multiplier=invalid)
+    assert store.single_account_key == first.key
+    assert store.get(first.key).enabled
+    assert not store.get(second.key).enabled
+    assert store.get(second.key).weight_multiplier == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored", [None, False, "oops", -1, 0, 0.0000001, 1_000_001])
+async def test_old_or_invalid_registry_multiplier_keeps_account_with_default(tmp_path: Path, stored: object) -> None:
+    """验证旧字段缺失及手工写坏的倍率不会删除账号或改变默认调度。"""
+    store = OAuthAccountStore(tmp_path)
+    record = await store.import_credentials(credentials("legacy", "legacy-web"), source="web-oauth")
+    payload = json.loads(store.registry_path.read_text())
+    if stored is None:
+        payload["accounts"][0].pop("weight_multiplier")
+    else:
+        payload["accounts"][0]["weight_multiplier"] = stored
+    store.registry_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert OAuthAccountStore(tmp_path).get(record.key).weight_multiplier == 1
+
+
+@pytest.mark.asyncio
+async def test_generated_alias_backfill_keeps_weight_multiplier(tmp_path: Path) -> None:
+    """验证加载时旧账号补全邮箱不会丢失用户倍率。"""
+    store = OAuthAccountStore(tmp_path)
+    record = await store.import_credentials(credentials("backfill", "old-web"), source="web-oauth")
+    await store.update(record.key, weight_multiplier=1.25)
+    payload = json.loads(store.auth_path(record.key).read_text())
+    payload["tokens"]["id_token"] = unsigned_id_token({"email": "owner@example.com"})
+    store.auth_path(record.key).write_text(json.dumps(payload), encoding="utf-8")
+    restored = OAuthAccountStore(tmp_path).get(record.key)
+    assert restored.alias == "owner@example.com"
+    assert restored.weight_multiplier == 1.25

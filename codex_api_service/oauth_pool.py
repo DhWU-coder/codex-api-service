@@ -427,6 +427,7 @@ class OAuthAccountPool:
                     "lastError": runtime.last_error if runtime else None,
                     "usage": runtime.usage if runtime else None,
                     "weight": weights.get(record.key, 0.0),
+                    "weightMultiplier": record.weight_multiplier,
                     "estimatedShare": weights.get(record.key, 0.0) / weight_total,
                     "nextRefreshAt": runtime.next_refresh_at if runtime else 0,
                     "lastSuccessfulRefreshAt": runtime.last_successful_refresh_at if runtime else 0,
@@ -591,6 +592,7 @@ class OAuthAccountPool:
                     enabled=runtime.record.enabled,
                     status=runtime.status,
                     max_concurrency=runtime.record.max_concurrency,
+                    weight_multiplier=runtime.record.weight_multiplier,
                 )
             )
         return candidates
