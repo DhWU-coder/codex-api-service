@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -123,7 +123,7 @@ const oauthAccountsStatus = {
       currentConcurrency: 2,
       status: "available",
       lastError: null,
-      usage: codexUsageStatus,
+      usage: codexUsageStatus as typeof codexUsageStatus | null,
       weight: 0.00338,
       estimatedShare: 1,
       nextRefreshAt: 1783815000,
@@ -541,11 +541,11 @@ describe("App theme mode", () => {
     });
   });
 
-  it("closes the quota detail drawer by button, backdrop and Escape", async () => {
+  it.each(["额度状态", "OAuth 账号"])("closes the quota detail drawer from %s by button, backdrop and Escape", async (page) => {
     // 额度详情沿用右滑抽屉的三种关闭方式，避免用户被困在遮罩层中。
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "额度状态" }));
-    const primaryQuota = await screen.findByRole("button", { name: "查看 账号 A Codex 主额度详情" });
+    fireEvent.click(await screen.findByRole("button", { name: page }));
+    const primaryQuota = await screen.findByRole("button", { name: page === "额度状态" ? "查看 账号 A Codex 主额度详情" : "账号 A" });
 
     fireEvent.click(primaryQuota);
     fireEvent.click(await screen.findByRole("button", { name: "关闭额度详情" }));
@@ -576,6 +576,117 @@ describe("App theme mode", () => {
 
     expect(await screen.findByRole("dialog", { name: "额度详情" })).toBeTruthy();
     expect(await screen.findByText("GPT-5.3-Codex-Spark")).toBeTruthy();
+  });
+
+  it.each(["名称", "卡片空白区域"])("opens the selected OAuth account quota from its %s", async (entry) => {
+    // 多账号下必须按账号键打开，不能把另一个账号的主额度或附加额度带入抽屉。
+    oauthAccountsResponse = {
+      ...oauthAccountsStatus,
+      accounts: [
+        oauthAccountsStatus.accounts[0],
+        {
+          ...oauthAccountsStatus.accounts[0], key: "account-b", alias: "账号 B",
+          usage: {
+            ...codexUsageStatus,
+            rateLimit: { ...codexUsageStatus.rateLimit, windows: [{ ...codexUsageStatus.rateLimit.windows[0], remainingPercent: 23 }] },
+            additionalRateLimits: [{ ...codexUsageStatus.additionalRateLimits[0], limitName: "账号 B 附加额度" }]
+          }
+        }
+      ]
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    const trigger = await screen.findByRole("button", { name: "账号 B" });
+    expect(trigger.tagName).toBe("BUTTON");
+    expect(trigger.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(screen.queryByText("账号 B 附加额度")).toBeNull();
+    fireEvent.click(entry === "名称" ? trigger : trigger.closest("article")!);
+    const drawer = await screen.findByRole("dialog", { name: "额度详情" });
+    expect(within(drawer).getByText("账号 B · Pro")).toBeTruthy();
+    expect(within(drawer).getByRole("heading", { name: "Codex 主额度" })).toBeTruthy();
+    expect(within(drawer).getByText("23%")).toBeTruthy();
+    expect(within(drawer).getByText("账号 B 附加额度")).toBeTruthy();
+    expect(within(drawer).queryByText("GPT-5.3-Codex-Spark")).toBeNull();
+    expect(within(drawer).queryByText("67%")).toBeNull();
+  });
+
+  it.each([
+    ["重命名", "重命名 OAuth 账号"],
+    ["并发设置", "设置账号并发"],
+    ["权重设置", "设置账号权重倍率"]
+  ])("keeps %s independent from the quota drawer", async (action, title) => {
+    // 编辑入口只打开对应设置，不能同时展开卡片详情遮住编辑弹窗。
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    fireEvent.click(await screen.findByRole("button", { name: action }));
+    expect(await screen.findByRole("dialog", { name: title })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "额度详情" })).toBeNull();
+  });
+
+  it("keeps enable, relogin and delete actions independent from the quota drawer", async () => {
+    // 管理区内全部按钮都应隔离点击冒泡，并继续调用原本的操作。
+    oauthAccountsResponse = {
+      ...oauthAccountsStatus,
+      accounts: [oauthAccountsStatus.accounts[0], { ...oauthAccountsStatus.accounts[0], key: "account-b", alias: "账号 B" }]
+    };
+    oauthLoginStartResponse = { id: "login-actions", status: "waiting", message: "等待重新授权", output: [], accountKey: null };
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    try {
+      render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+      const card = (await screen.findByRole("button", { name: "账号 A" })).closest("article")!;
+      fireEvent.click(within(card).getByRole("button", { name: "停用" }));
+      await waitFor(() => expect(capturedRequests).toContainEqual({
+        url: "/admin/oauth/accounts/account-a", method: "PATCH", body: { enabled: false }
+      }));
+      expect(screen.queryByRole("dialog", { name: "额度详情" })).toBeNull();
+      fireEvent.click(within(card).getByRole("button", { name: "重新登录" }));
+      expect(await screen.findByText("等待重新授权")).toBeTruthy();
+      expect(screen.queryByRole("dialog", { name: "额度详情" })).toBeNull();
+      fireEvent.click(within(card).getByRole("button", { name: "删除" }));
+      expect(confirm).toHaveBeenCalledWith("确认删除 账号 A？");
+      expect(screen.queryByRole("dialog", { name: "额度详情" })).toBeNull();
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it("opens an empty quota drawer when an OAuth account has no usage data", async () => {
+    // 未成功读取额度的账号仍可点击，并提供明确反馈而不是静默无响应。
+    oauthAccountsResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({ ...account, usage: null }))
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    fireEvent.click(await screen.findByRole("button", { name: "账号 A" }));
+    const drawer = await screen.findByRole("dialog", { name: "额度详情" });
+    expect(within(drawer).getByText("暂无额度数据")).toBeTruthy();
+    expect(within(drawer).queryByRole("heading", { name: "Codex 主额度" })).toBeNull();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "额度详情" })).toBeNull();
+  });
+
+  it("updates an open OAuth quota drawer when an in-flight refresh completes", async () => {
+    // 刷新尚未完成时打开详情，返回的新快照必须同时更新卡片与抽屉。
+    oauthAccountsRefreshResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({
+        ...account,
+        usage: {
+          ...codexUsageStatus,
+          rateLimit: { ...codexUsageStatus.rateLimit, windows: [{ ...codexUsageStatus.rateLimit.windows[0], remainingPercent: 42 }] }
+        }
+      }))
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    const trigger = await screen.findByRole("button", { name: "账号 A" });
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    fireEvent.click(trigger);
+    const drawer = await screen.findByRole("dialog", { name: "额度详情" });
+    await waitFor(() => expect(within(drawer).getByText("42%")).toBeTruthy());
+    expect(screen.getByRole("progressbar", { name: "账号 A 5h 剩余额度" }).getAttribute("aria-valuenow")).toBe("42");
   });
 
   it("refreshes the visible multi-account quota snapshot", async () => {

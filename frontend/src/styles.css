@@ -1998,6 +1998,39 @@ th {
   border-radius: 14px;
   padding: 18px;
   background: var(--message-bg);
+  cursor: pointer;
+}
+
+/* 名称保留原生按钮的键盘操作，卡片空白区域也可打开同一额度抽屉。 */
+.oauth-account-card:hover {
+  border-color: var(--primary-bg);
+}
+
+.oauth-account-detail-trigger {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.oauth-account-detail-trigger span {
+  color: var(--page-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.oauth-account-detail-trigger:focus-visible {
+  outline: 2px solid var(--primary-bg);
+  outline-offset: 4px;
+  border-radius: 4px;
 }
 
 .oauth-account-head,

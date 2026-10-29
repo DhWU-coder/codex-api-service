@@ -713,12 +713,12 @@ export function App() {
     }
     if (quotaDetailSelection.source === "account") {
       const account = oauthAccounts?.accounts.find((item) => item.key === quotaDetailSelection.accountKey);
-      if (!account?.usage) {
+      if (!account) {
         return null;
       }
       return {
         accountLabel: account.alias,
-        planType: account.usage.planType,
+        planType: account.usage?.planType || "未知套餐",
         usage: account.usage
       };
     }
@@ -2239,10 +2239,19 @@ export function App() {
                     && oauthAccounts.accounts.filter((item) => item.enabled).length === 1;
                   const cannotDisable = protectedSingleAccount || protectedLastMultiAccount;
                   return (
-                  <article className="oauth-account-card" key={account.key}>
+                  <article
+                    className="oauth-account-card"
+                    key={account.key}
+                    onClick={() => setQuotaDetailSelection({ source: "account", accountKey: account.key })}
+                  >
                     <div className="oauth-account-head">
                       <div>
-                        <h3>{account.alias}</h3>
+                        <h3>
+                          <button className="oauth-account-detail-trigger" type="button" aria-haspopup="dialog">
+                            {account.alias}
+                            <span aria-hidden="true">查看详情 →</span>
+                          </button>
+                        </h3>
                         <p>{formatPlanType(account.usage?.planType || "未知套餐")} · {account.authorizations && !account.authorizations.some((item) => item.active)
                           ? "无可用授权" : `当前授权 ${formatAuthorizationSource(account.source)}`}</p>
                       </div>
@@ -2280,7 +2289,8 @@ export function App() {
                           </div>
                         </div>
                       ) : null}
-                      <div className="oauth-account-actions">
+                      {/* 管理按钮只执行原操作，避免点击冒泡时同时展开额度详情。 */}
+                      <div className="oauth-account-actions" onClick={(event) => event.stopPropagation()}>
                       <button
                         className="secondary-button"
                         onClick={() => setAccountEditor({
@@ -2545,14 +2555,24 @@ export function App() {
               </button>
             </header>
             <div className="request-log-drawer-body quota-detail-drawer-body">
-              <UsageLimitCard title="Codex 主额度" rateLimit={selectedQuotaDetails.usage.rateLimit} />
-              {selectedQuotaDetails.usage.additionalRateLimits.map((item) => (
-                <UsageLimitCard
-                  key={item.meteredFeature || item.limitName}
-                  title={item.limitName}
-                  rateLimit={item.rateLimit}
-                />
-              ))}
+              {selectedQuotaDetails.usage ? (
+                <>
+                  <UsageLimitCard title="Codex 主额度" rateLimit={selectedQuotaDetails.usage.rateLimit} />
+                  {selectedQuotaDetails.usage.additionalRateLimits.map((item) => (
+                    <UsageLimitCard
+                      key={item.meteredFeature || item.limitName}
+                      title={item.limitName}
+                      rateLimit={item.rateLimit}
+                    />
+                  ))}
+                </>
+              ) : (
+                <div className="empty-state">
+                  <Gauge size={28} />
+                  <h3>暂无额度数据</h3>
+                  <p>关闭详情后可点击账号页的“刷新”，重新读取额度。</p>
+                </div>
+              )}
             </div>
           </aside>
         </div>
