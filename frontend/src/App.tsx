@@ -568,6 +568,14 @@ function primaryUsageWindow(account: OAuthAccountSnapshot) {
     || windows.filter((item) => item.limitWindowSeconds > 0).sort((left, right) => left.limitWindowSeconds - right.limitWindowSeconds)[0];
 }
 
+function accountCardUsageWindow(account: OAuthAccountSnapshot) {
+  // 周额度耗尽时优先展示恢复时间，其他情况仍展示真实 5 小时窗口或现有唯一窗口。
+  const exhaustedWeekly = account.usage?.rateLimit.windows.find(
+    (item) => item.limitWindowSeconds === 604800 && item.remainingPercent <= 0
+  );
+  return exhaustedWeekly || primaryUsageWindow(account);
+}
+
 function QuotaFreshness({ account }: { account: OAuthAccountSnapshot }) {
   // 成功更新时间与额度重置时间分别展示，避免旧缓存看起来始终有效。
   const updatedAt = account.lastSuccessfulRefreshAt || 0;
@@ -2230,7 +2238,7 @@ export function App() {
             {oauthAccounts?.accounts?.length ? (
               <div className="oauth-account-list">
                 {oauthAccounts.accounts.map((account) => {
-                  const primaryWindow = primaryUsageWindow(account);
+                  const primaryWindow = accountCardUsageWindow(account);
                   const protectedSingleAccount =
                     oauthAccounts.dispatchMode === "single" && oauthAccounts.singleAccountKey === account.key;
                   const protectedLastMultiAccount =

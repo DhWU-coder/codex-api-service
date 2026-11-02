@@ -750,6 +750,101 @@ describe("App theme mode", () => {
     expect(await screen.findByText(new Date(1783814968 * 1000).toLocaleString())).toBeTruthy();
   });
 
+  it.each([
+    { weekly: 0, fiveHour: 100, expected: "Weekly" },
+    { weekly: 0, fiveHour: 0, expected: "Weekly" },
+    { weekly: 79, fiveHour: 0, expected: "5h" },
+    { weekly: 0.1, fiveHour: 67, expected: "5h" }
+  ])("shows $expected when weekly remaining is $weekly and five-hour remaining is $fiveHour", async ({ weekly, fiveHour, expected }) => {
+    // 周额度耗尽优先，剩余、重置时间和进度条必须同时切到对应真实窗口。
+    const windows = codexUsageStatus.rateLimit.windows.map((window) => ({
+      ...window,
+      remainingPercent: window.label === "Weekly" ? weekly : fiveHour
+    })).reverse();
+    oauthAccountsResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({
+        ...account, usage: { ...codexUsageStatus, rateLimit: { ...codexUsageStatus.rateLimit, windows } }
+      }))
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    const card = (await screen.findByRole("button", { name: "账号 A" })).closest("article")!;
+    const selected = windows.find((window) => window.label === expected)!;
+    const other = windows.find((window) => window.label !== expected)!;
+    const metrics = card.querySelector(".oauth-account-metrics")!;
+    const remaining = within(metrics as HTMLElement).getByText(`${expected} 剩余`).parentElement!;
+    expect(within(remaining).getByText(`${selected.remainingPercent}%`)).toBeTruthy();
+    expect(within(card).getByText(`${expected} 重置`)).toBeTruthy();
+    expect(within(card).getByText(new Date(selected.resetAt * 1000).toLocaleString())).toBeTruthy();
+    expect(within(card).queryByText(new Date(other.resetAt * 1000).toLocaleString())).toBeNull();
+    const progress = within(card).getByRole("progressbar", { name: `账号 A ${expected} 剩余额度` });
+    expect(progress.getAttribute("aria-valuenow")).toBe(String(selected.remainingPercent));
+    expect((progress.firstElementChild as HTMLElement).style.width).toBe(`${selected.remainingPercent}%`);
+    fireEvent.click(within(card).getByRole("button", { name: "账号 A" }));
+    const drawer = await screen.findByRole("dialog", { name: "额度详情" });
+    const mainQuota = within(drawer).getByRole("heading", { name: "Codex 主额度" }).closest("section")!;
+    expect(within(mainQuota).getByText("5h 剩余")).toBeTruthy();
+    expect(within(mainQuota).getByText("Weekly 剩余")).toBeTruthy();
+  });
+
+  it.each([
+    { label: "5h", remaining: 0 },
+    { label: "Weekly", remaining: 0 },
+    { label: "Weekly", remaining: 25 }
+  ])("keeps the only real $label quota window with $remaining remaining", async ({ label, remaining }) => {
+    // 单窗口账号沿用实际窗口，不能虚构 5h 或 Weekly 数值及重置时间。
+    const window = { ...codexUsageStatus.rateLimit.windows.find((item) => item.label === label)!, remainingPercent: remaining };
+    oauthAccountsResponse = {
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({
+        ...account, usage: { ...codexUsageStatus, rateLimit: { ...codexUsageStatus.rateLimit, windows: [window] } }
+      }))
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    const progress = await screen.findByRole("progressbar", { name: `账号 A ${label} 剩余额度` });
+    expect(progress.getAttribute("aria-valuenow")).toBe(String(remaining));
+    expect(screen.getByText(`${label} 重置`)).toBeTruthy();
+    expect(screen.getByText(new Date(window.resetAt * 1000).toLocaleString())).toBeTruthy();
+    expect(screen.queryByText(`${label === "5h" ? "Weekly" : "5h"} 重置`)).toBeNull();
+  });
+
+  it.each([
+    { before: 79, after: 0, expected: "Weekly" },
+    { before: 0, after: 79, expected: "5h" }
+  ])("switches the quota summary to $expected after a weekly refresh from $before to $after", async ({ before, after, expected }) => {
+    // 刷新后双向切换窗口，避免标签、时间或进度条残留上一次的选择。
+    const snapshot = (remaining: number) => ({
+      ...oauthAccountsStatus,
+      accounts: oauthAccountsStatus.accounts.map((account) => ({
+        ...account,
+        usage: {
+          ...codexUsageStatus,
+          rateLimit: {
+            ...codexUsageStatus.rateLimit,
+            windows: codexUsageStatus.rateLimit.windows.map((window) =>
+              window.label === "Weekly" ? { ...window, remainingPercent: remaining } : window
+            )
+          }
+        }
+      }))
+    });
+    oauthAccountsResponse = snapshot(before);
+    oauthAccountsRefreshResponse = snapshot(after);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "OAuth 账号" }));
+    const initial = before === 0 ? "Weekly" : "5h";
+    await screen.findByRole("progressbar", { name: `账号 A ${initial} 剩余额度` });
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const progress = await screen.findByRole("progressbar", { name: `账号 A ${expected} 剩余额度` });
+    expect(progress.getAttribute("aria-valuenow")).toBe(String(expected === "Weekly" ? 0 : 67));
+    expect(screen.queryByRole("progressbar", { name: `账号 A ${initial} 剩余额度` })).toBeNull();
+    expect(screen.getByText(`${expected} 重置`)).toBeTruthy();
+    const selected = codexUsageStatus.rateLimit.windows.find((window) => window.label === expected)!;
+    expect(screen.getByText(new Date(selected.resetAt * 1000).toLocaleString())).toBeTruthy();
+  });
+
   it("forces quota refresh from the OAuth account page and replaces stale data", async () => {
     // 账号页按钮必须查询上游，并用成功返回的时间和额度替换旧缓存。
     oauthAccountsResponse = {
