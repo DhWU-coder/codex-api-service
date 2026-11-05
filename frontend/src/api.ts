@@ -1,5 +1,6 @@
 import type {
   AdminConfig,
+  AdminConnections,
   AdminHealth,
   AdminModelCatalog,
   AuthReloadResult,
@@ -87,6 +88,15 @@ export async function saveAdminConfig(
     throw new Error(`配置保存失败：${await responseErrorMessage(response)}`);
   }
   return (await response.json()) as { restart_required: boolean; applied?: boolean };
+}
+
+// 读取服务电脑当前的本地及局域网连接入口。
+export async function fetchAdminConnections(apiKey: string): Promise<AdminConnections> {
+  const response = await fetch("/admin/connections", { headers: buildAuthHeaders(apiKey) });
+  if (!response.ok) {
+    throw new Error(`连接地址读取失败：${await responseErrorMessage(response)}`);
+  }
+  return (await response.json()) as AdminConnections;
 }
 
 // 读取管理台运行健康状态。

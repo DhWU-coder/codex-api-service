@@ -10,6 +10,7 @@ import {
   KeyRound,
   MessageSquare,
   Moon,
+  Network,
   RefreshCw,
   Save,
   Send,
@@ -61,6 +62,7 @@ import {
   serializeModelRequestOverrides
 } from "./modelRequestConfig";
 import { calculateVirtualLogWindow } from "./logVirtualization";
+import { ConnectionsPage } from "./ConnectionsPage";
 import type {
   AdminConfig,
   AdminHealth,
@@ -78,7 +80,7 @@ import type {
 } from "./types";
 
 // 顶部导航标签的枚举，保持状态值简短稳定。
-type ActiveTab = "dashboard" | "chat" | "logs" | "config" | "model-config" | "oauth-accounts" | "account-load" | "usage-status";
+type ActiveTab = "dashboard" | "chat" | "logs" | "connections" | "config" | "model-config" | "oauth-accounts" | "account-load" | "usage-status";
 
 // 控制台主题只提供明确的浅色和深色两种渲染结果。
 type ThemeMode = "light" | "dark";
@@ -1511,6 +1513,10 @@ export function App() {
             <Activity size={18} />
             请求日志
           </button>
+          <button className={activeTab === "connections" ? "active" : ""} onClick={() => setActiveTab("connections")}>
+            <Network size={18} />
+            连接端口
+          </button>
           <button
             className={activeTab === "config" ? "active" : ""}
             onClick={() => {
@@ -1930,6 +1936,8 @@ export function App() {
             </div>
           </section>
         ) : null}
+
+        {activeTab === "connections" ? <ConnectionsPage apiKey={apiKey} /> : null}
 
         {activeTab === "config" ? (
           <section className="panel" aria-label="配置">

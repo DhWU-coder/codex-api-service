@@ -197,6 +197,8 @@ codex-api-service uninstall
 
 `start`、`run` 和 `restart` 会按照有效配置打印访问地址。当 `server.host` 为 `0.0.0.0` 时，会额外打印可复制的 `External API` 和 `External Console`。这些地址表示局域网或当前网络接口可访问，并不等于已经完成公网端口映射或 HTTPS 配置。外部监听时建议配置 `api.local_api_key`。
 
+控制台的“连接端口”页展示本地和局域网 IP、端口、API Base URL、控制台、健康检查及模型列表地址，可逐项复制。点击“刷新”重新检测当前局域网地址；未开放局域网监听或检测不到 IP 时显示原因。其他服务填写 API Base URL，浏览器查看页面使用控制台地址。
+
 后台日志位置：
 
 - macOS：`./logs/launchd.out.log` 和 `./logs/launchd.err.log`

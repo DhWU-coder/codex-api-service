@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -206,6 +207,79 @@ async def test_admin_config_patch_hot_applies_runtime_fields(tmp_path: Path) -> 
     assert allowed.json()["data"][0]["id"] == "gpt-5.5-mini"
     assert snapshot.json()["codex"]["reasoning_effort"] == "high"
     assert snapshot.json()["usage"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+async def test_admin_connections_loopback_disables_lan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str) -> None:
+    """回环监听不探测局域网，地址包含实际端口并正确格式化 IPv6。"""
+    def unexpected_probe() -> None:
+        raise AssertionError("回环监听不应探测局域网")
+
+    monkeypatch.setattr("codex_api_service.app._detect_lan_host", unexpected_probe)
+    config = replace(make_admin_config(tmp_path), server=ServerConfig(host=host, port=9876))
+    app = create_app(config=config, codex_client=AdminFakeCodexClient())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/admin/connections")
+    assert response.status_code == 200
+    body = response.json()
+    expected_host = "[::1]" if host == "::1" else host
+    assert body["local"]["api"] == f"http://{expected_host}:9876/v1"
+    assert body["local"]["host"] == host
+    assert body["port"] == 9876
+    assert body["lan"] is None
+    assert "尚未开放局域网监听" in body["lanNote"]
+
+
+@pytest.mark.asyncio
+async def test_admin_connections_refreshes_lan_ip_and_requires_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """通配监听每次读取最新服务端网卡，鉴权失败时不泄露地址或密钥。"""
+    config = replace(make_admin_config(tmp_path, api_key="connection-secret"), server=ServerConfig(host="0.0.0.0", port=9876))
+    app = create_app(config=config, codex_client=AdminFakeCodexClient())
+    hosts = iter(["10.0.0.10", "10.0.0.20", None])
+    monkeypatch.setattr("codex_api_service.app._detect_lan_host", lambda: next(hosts))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://unrelated-client") as client:
+        denied = await client.get("/admin/connections")
+        assert denied.status_code == 401
+        for host in ["10.0.0.10", "10.0.0.20", None]:
+            response = await client.get("/admin/connections", headers={"Authorization": "Bearer connection-secret"})
+            assert response.status_code == 200
+            body = response.json()
+            assert body["listenHost"] == "0.0.0.0"
+            assert body["local"] == {
+                "host": "127.0.0.1", "api": "http://127.0.0.1:9876/v1", "console": "http://127.0.0.1:9876/ui",
+                "health": "http://127.0.0.1:9876/health", "models": "http://127.0.0.1:9876/v1/models",
+            }
+            if host:
+                assert body["lan"] == {
+                    "host": host, "api": f"http://{host}:9876/v1", "console": f"http://{host}:9876/ui",
+                    "health": f"http://{host}:9876/health", "models": f"http://{host}:9876/v1/models",
+                }
+                assert body["lanNote"] is None
+            else:
+                assert body["lan"] is None
+                assert "未检测到局域网 IP" in body["lanNote"]
+            assert "connection-secret" not in response.text
+            assert "unrelated-client" not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["10.0.0.30", "fd00::30", "::"])
+async def test_admin_connections_specific_interface_and_ipv6(tmp_path: Path, host: str) -> None:
+    """指定网卡不能伪造回环入口，IPv6 通配不能猜测 IPv4 局域网可达。"""
+    config = replace(make_admin_config(tmp_path), server=ServerConfig(host=host, port=9876))
+    app = create_app(config=config, codex_client=AdminFakeCodexClient())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        body = (await client.get("/admin/connections")).json()
+    if host == "::":
+        assert body["local"]["api"] == "http://[::1]:9876/v1"
+        assert body["lan"] is None
+        assert "未检测到" in body["lanNote"]
+    else:
+        assert body["local"] is None
+        assert "仅监听指定网络接口" in body["localNote"]
+        url_host = f"[{host}]" if ":" in host else host
+        assert body["lan"]["api"] == f"http://{url_host}:9876/v1"
 
 
 @pytest.mark.asyncio

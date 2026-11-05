@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import socket
@@ -370,6 +371,12 @@ def create_app(
             usage_logger.usage_config = app_config.usage
             app.state.config = app_config
         return result
+
+    @app.get("/admin/connections")
+    def admin_connections(request: Request) -> dict[str, Any]:
+        """返回当前监听配置对应的本地及局域网连接入口。"""
+        _require_local_auth(request, app_config)
+        return _connection_info(app_config)
 
     @app.get("/admin/health")
     async def admin_health(request: Request) -> dict[str, Any]:
@@ -1325,6 +1332,44 @@ def _startup_urls(config: AppConfig, *, lan_host: str | None = None) -> dict[str
         else:
             urls["lan_note"] = "not detected, use your machine LAN IP"
     return urls
+
+
+def _connection_info(config: AppConfig) -> dict[str, Any]:
+    """只为实际监听的接口生成连接地址，缺失网卡信息时不猜测地址。"""
+    host, port = config.server.host, config.server.port
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host.lower() == "localhost"
+    wildcard = host in {"0.0.0.0", "::"}
+    local_host = ("::1" if host == "::" else "127.0.0.1") if wildcard else host
+    lan_host = _detect_lan_host() if host == "0.0.0.0" else None
+    if not wildcard and not loopback:
+        lan_host = host
+
+    def addresses(address: str) -> dict[str, str]:
+        """IPv6 使用方括号，端口及所有入口统一来自当前服务配置。"""
+        url_host = f"[{address}]" if ":" in address else address
+        base = f"http://{url_host}:{port}"
+        return {
+            "host": address,
+            "api": f"{base}/v1",
+            "console": f"{base}/ui",
+            "health": f"{base}/health",
+            "models": f"{base}/v1/models",
+        }
+
+    return {
+        "listenHost": host,
+        "port": port,
+        "local": addresses(local_host) if wildcard or loopback else None,
+        "localNote": None if wildcard or loopback else "当前仅监听指定网络接口，请使用局域网连接地址。",
+        "lan": addresses(lan_host) if lan_host else None,
+        "lanNote": None if lan_host else (
+            "当前仅允许本机连接，尚未开放局域网监听。" if loopback
+            else "未检测到局域网 IP，请检查服务电脑的网络连接。"
+        ),
+    }
 
 
 def _detect_lan_host() -> str | None:

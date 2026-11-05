@@ -263,6 +263,12 @@ describe("App theme mode", () => {
           }
           return new Response(JSON.stringify(healthResponse), { status: 200 });
         }
+        if (url === "/admin/connections") {
+          return new Response(JSON.stringify({
+            listenHost: "127.0.0.1", port: 1219, local: null, localNote: "测试连接页入口",
+            lan: null, lanNote: "当前仅允许本机连接，尚未开放局域网监听。"
+          }), { status: 200 });
+        }
         if (url.startsWith("/admin/models")) {
           if (!modelEndpointAvailable) {
             return new Response(JSON.stringify({ detail: "catalog unavailable" }), { status: 503 });
@@ -363,6 +369,17 @@ describe("App theme mode", () => {
       expect(capturedRequests.some((request) => request.url === "/admin/dashboard?range=all&recent_days=7")).toBe(true);
     });
     expect(capturedRequests.some((request) => request.url.startsWith("/admin/requests"))).toBe(false);
+  });
+
+  it("opens connection ports from the sidebar", async () => {
+    // 新页面仅在用户进入时读取连接地址，不增加其他页面的启动请求。
+    render(<App />);
+    const navigation = await screen.findByRole("button", { name: "连接端口" });
+    expect(capturedRequests.some((request) => request.url === "/admin/connections")).toBe(false);
+    fireEvent.click(navigation);
+    expect(await screen.findByRole("heading", { name: "连接端口" })).toBeTruthy();
+    expect(await screen.findByText("测试连接页入口")).toBeTruthy();
+    expect(capturedRequests.some((request) => request.url === "/admin/connections")).toBe(true);
   });
 
   it("moves detailed runtime status to the config page", async () => {

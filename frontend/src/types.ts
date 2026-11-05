@@ -83,6 +83,24 @@ export type AdminHealth = {
   codex: { client_version: string; default_model?: string; fast_mode?: boolean };
 };
 
+// 连接地址只由服务端生成，避免误用浏览器所在电脑或代理的地址。
+export type ConnectionAddresses = {
+  host: string;
+  api: string;
+  console: string;
+  health: string;
+  models: string;
+};
+
+export type AdminConnections = {
+  listenHost: string;
+  port: number;
+  local: ConnectionAddresses | null;
+  localNote: string | null;
+  lan: ConnectionAddresses | null;
+  lanNote: string | null;
+};
+
 // 重新导入 Codex 登录后的状态响应。
 export type AuthReloadResult = {
   oauth: { available: boolean; expired?: boolean; reloaded: boolean };

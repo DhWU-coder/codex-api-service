@@ -2555,3 +2555,104 @@ th {
   font-size: 12px;
   line-height: 1.7;
 }
+
+/* 连接地址按本地和局域网分组，长地址换行且保留可选择复制的原文。 */
+.connections-page {
+  display: grid;
+  gap: 18px;
+  padding: 20px;
+}
+
+.connection-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.connection-card {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  background: var(--message-bg);
+}
+
+.connection-card header,
+.connection-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.connection-card h3,
+.connection-description,
+.connection-meta dd {
+  margin: 0;
+}
+
+.connection-description {
+  color: var(--page-muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.connection-card > .connection-description {
+  margin-top: 10px;
+}
+
+.connection-meta {
+  gap: 14px 36px;
+  margin: 18px 0;
+}
+
+.connection-meta dt,
+.connection-address-row span {
+  color: var(--page-muted);
+  font-size: 12px;
+}
+
+.connection-meta dd {
+  margin-top: 5px;
+  font-weight: 700;
+}
+
+.connection-address-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 16px 0;
+  border-top: 1px solid var(--panel-divider);
+}
+
+.connection-address-row code {
+  display: block;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+  user-select: text;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.connection-copy {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+}
+
+.connection-copy-note {
+  max-width: 130px;
+  text-align: right;
+}
+
+/* 窄屏将两类地址纵向排列，复制失败提示也不能挤压地址正文。 */
+@media (max-width: 1100px) {
+  .connection-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 520px) {
+  .connection-address-row { grid-template-columns: minmax(0, 1fr); }
+  .connection-copy { justify-items: start; }
+  .connection-copy-note { max-width: none; text-align: left; }
+}
